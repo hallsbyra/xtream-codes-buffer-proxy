@@ -43,7 +43,7 @@ MAX_FAILURES = 6
 # Below this much free disk nothing is downloaded, not even what is playing.
 CRITICAL_FREE_BYTES = 512 * 1024 * 1024
 # Statuses where retrying the same request will not help.
-FATAL_STATUSES = {400, 401, 404, 410}
+FATAL_STATUSES = {400, 401, 404, 410, 416}
 # Container headers and indexes live at the start or end of the file; keep them.
 KEEP_EDGE_BYTES = 16 * 1024 * 1024
 # Keep this much playback behind the viewer for short rewinds.
@@ -112,6 +112,9 @@ class VodFile:
         self.last_error: str | None = None
         self.capped = False
         self.uncacheable = False
+        # The provider's file changed under us; the cache must be rebuilt
+        self.stale = False
+        self._punch_unsupported = False
         self.write_pos: int | None = None
         self.rate = RateMeter()
         # Provider path including credentials; kept in memory only.
@@ -199,7 +202,9 @@ class VodFile:
         return not self._full
 
     def _wants_data(self) -> bool:
-        if self.error or self.uncacheable or self._deleted:
+        if self.error or self.uncacheable or self._deleted or self.stale:
+            return False
+        if not self.current:
             return False
         if self.size is None:
             return bool(self.readers) or self._want_foreground or self._ready_waiters > 0
@@ -251,7 +256,7 @@ class VodFile:
         if self.uncacheable:
             raise NotCacheable()
         if self.size is None:
-            raise self.error or UpstreamError(502)
+            raise self.error or UpstreamError(502 if self.current else 503)
 
     def open_reader(self, peer: str, pos: int) -> Reader:
         reader = Reader(peer, pos)
@@ -280,6 +285,11 @@ class VodFile:
             if self._deleted:
                 reader.waiting = False
                 raise UpstreamError(410, "title was removed from the cache")
+            if not self.current:
+                # Another title took the provider connection; the bytes this
+                # reader waits for will not come.
+                reader.waiting = False
+                raise UpstreamError(503, "another title took the provider connection")
             if not requested:
                 requested = True
                 reader.waiting = True
@@ -327,6 +337,9 @@ class VodFile:
         while True:
             if not self._wants_data():
                 self.state = self._idle_state()
+                if self.size is None:
+                    # Nobody will fetch the headers now; let waiting requests go.
+                    self._ready.set()
                 self._wake.clear()
                 try:
                     await asyncio.wait_for(self._wake.wait(), 60)
@@ -386,9 +399,8 @@ class VodFile:
         upstream = self.cache.upstream
         headers = dict(self._headers, Range=f"bytes={start}-")
         async with await upstream.get(upstream.url(self._upstream_path), headers) as resp:
-            if resp.status == 416 and self.size is not None:
-                self.ranges.add(start, self.size)
-                return
+            if resp.status == 416:
+                self._mark_stale("provider rejected the byte range")
             if resp.status not in (200, 206):
                 raise UpstreamError(resp.status)
             offset, total = _parse_content_range(resp)
@@ -401,7 +413,7 @@ class VodFile:
                     return
                 self._init_file(total, resp.headers.get("Content-Type"))
             elif total and total != self.size:
-                raise UpstreamError(502, f"size changed from {self.size} to {total}")
+                self._mark_stale(f"size changed from {self.size} to {total}")
             pos = offset
             self.write_pos = pos
             self.state = "downloading"
@@ -426,6 +438,15 @@ class VodFile:
             if pos < (self.size or 0) and resp.status == 200 and not self.supports_range:
                 raise UpstreamError(502, "connection ended early")
 
+    def _mark_stale(self, why: str) -> None:
+        """Stop serving this copy; the next request starts a fresh one."""
+        log.warning("%s: %s; dropping the cached copy", self.label, why)
+        self.stale = True
+        self.error = UpstreamError(502, f"the file changed at the provider ({why})")
+        self._ready.set()
+        self._changed.notify()
+        raise self.error
+
     # --- disk -------------------------------------------------------------------
 
     def trim_played(self) -> None:
@@ -438,14 +459,19 @@ class VodFile:
         end = min(keep_from, self.size - KEEP_EDGE_BYTES)
         if end <= KEEP_EDGE_BYTES:
             return
-        removed = self.ranges.remove(KEEP_EDGE_BYTES, end)
-        for start, stop in removed:
+        if self._punch_unsupported:
+            return
+        freed = False
+        for start, stop in self.ranges.within(KEEP_EDGE_BYTES, end):
             try:
                 punch_hole(self._open(), start, stop - start)
             except OSError as exc:
-                log.warning("%s: could not free disk space (%s)", self.label, exc)
-                return
-        if removed:
+                log.warning("%s: could not free disk space (%s); keeping played data", self.label, exc)
+                self._punch_unsupported = True
+                break
+            self.ranges.remove(start, stop)
+            freed = True
+        if freed:
             self._save_meta()
 
     def _init_file(self, size: int, content_type: str | None) -> None:
@@ -552,7 +578,7 @@ class VodCache:
     def get(self, kind: str, stream_id: str, ext: str) -> VodFile:
         key = f"{kind}_{stream_id}"
         vf = self.files.get(key)
-        if vf is None or vf.ext != ext:
+        if vf is None or vf.ext != ext or vf.stale:
             if vf is not None:
                 self.remove(vf)
             vf = VodFile(self, kind, stream_id, ext)

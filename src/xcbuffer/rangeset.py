@@ -25,6 +25,10 @@ class RangeSet:
             j += 1
         ranges[i:j] = [[start, end]]
 
+    def within(self, start: int, end: int) -> list[tuple[int, int]]:
+        """The covered parts of [start, end)."""
+        return [(max(a, start), min(b, end)) for a, b in self._ranges if a < end and b > start]
+
     def remove(self, start: int, end: int) -> list[tuple[int, int]]:
         """Remove [start, end) and return the byte ranges that were covered."""
         removed = []

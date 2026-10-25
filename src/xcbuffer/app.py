@@ -98,6 +98,8 @@ class Passthrough:
                     for resp in list(self.active):
                         resp.close()
                     self.active.clear()
+            if self._preempted or self.slot.holder is not self:
+                raise UpstreamError(503, "another request took the provider connection")
             self._pending = asyncio.ensure_future(connect())
             try:
                 resp = await self._pending

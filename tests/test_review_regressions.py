@@ -1,13 +1,17 @@
 """Regressions from code review: each test reproduced a defect before its fix."""
 
 import asyncio
+import errno
 from unittest.mock import patch
 
+import pytest
 from aiohttp import web
 
-from conftest import MOVIE, status, ts_packets
+from conftest import MOVIE, status, ts_packets, wait_for
 from xcbuffer import app as app_module
-from xcbuffer.app import CATALOG, SLOT, VOD
+from xcbuffer import vod as vod_module
+from xcbuffer.app import CATALOG, RELAY, SLOT, VOD
+from xcbuffer.upstream import UpstreamError
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -170,3 +174,93 @@ async def test_sharing_tv_is_also_displaced_on_switch(provider, settings, make_p
     for response in (a, b, movie, b_reconnect):
         response.close()
     assert response_status == 503, f"auto-reconnect stole slot: {viewer}"
+
+# --- third review ---
+
+
+async def test_preempt_relay_while_another_relay_waits_for_handover(provider, settings, make_proxy):
+    provider.movie_delay = .02
+    client = await make_proxy(settings)
+    a = await client.get("/live/user/pass/5.raw")
+    await a.content.readexactly(188)
+    b = asyncio.create_task(client.get("/live/user/pass/6.raw"))
+    await asyncio.sleep(.05)
+    relay = client.app[RELAY]
+    assert relay._opening.locked() and relay._pending is None and relay.active
+    movie = await asyncio.wait_for(client.get("/movie/user/pass/1.mp4"), 3)
+    await movie.content.readexactly(188)
+    b_response = await asyncio.wait_for(b, 3)
+    for response in (a, b_response, movie):
+        response.close()
+    assert provider.max_open_streams == 1
+
+
+async def test_old_movie_reader_does_not_resume_download_after_switch(provider, settings, make_proxy):
+    provider.movie_delay = .01
+    client = await make_proxy(settings)
+    first = await client.get("/movie/user/pass/1.mp4")
+    await first.content.readexactly(1024)
+    consume_first = asyncio.create_task(first.content.read())
+    second = await client.get("/movie/user/pass/2.mp4")
+    assert await second.read() == MOVIE
+    await asyncio.sleep(.3)
+    old_requests = [p for p in provider.stream_requests if "/movie/user/pass/1.mp4" in p]
+    consume_first.cancel()
+    await asyncio.gather(consume_first, return_exceptions=True)
+    first.close()
+    client.app[VOD].remove(client.app[VOD].files["movie_1"])
+    assert len(old_requests) == 1, f"displaced title continued downloading: {old_requests}"
+
+
+async def test_416_does_not_mark_unwritten_bytes_as_cached(provider, settings, make_proxy, aiohttp_server):
+    reject = False
+
+    async def movie(request):
+        if reject:
+            # The backing object has been replaced with a shorter file.
+            return web.Response(status=416, headers={"Content-Range": "bytes */1024"})
+        return await provider.movie(request)
+
+    app = web.Application()
+    app.router.add_get("/movie/{user}/{password}/{name}", movie)
+    app.router.add_get("/player_api.php", provider.player_api)
+    server = await aiohttp_server(app)
+    provider.movie_delay = .005
+    client = await make_proxy(settings, buffer_minutes=1, upstream_url=str(server.make_url("")).rstrip("/"))
+    first = await client.get("/movie/user/pass/1.mp4", headers={"Range": "bytes=0-9"})
+    assert await first.read() == MOVIE[:10]
+    vf = client.app[VOD].files["movie_1"]
+
+    async def full():
+        return vf.state == "full"
+
+    await wait_for(full)
+    reject = True
+    # Isolate the fetch. Through the full HTTP handler the bogus coverage
+    # also leaves a waiting reader in a busy loop that starves the event loop.
+    start = len(MOVIE) - 100
+    with pytest.raises(UpstreamError):
+        await vf._fetch(start)
+    available = vf.ranges.covered_from(start)
+    assert available == 0, f"416 fabricated {available} bytes of cache coverage"
+    # The copy is dropped; the next request starts a fresh one.
+    assert vf.stale
+    assert client.app[VOD].get("movie", "1", "mp4") is not vf
+    client.app[VOD].remove(client.app[VOD].files["movie_1"])
+
+
+async def test_failed_hole_punch_preserves_accounting(provider, settings, make_proxy, monkeypatch):
+    monkeypatch.setattr(vod_module, "KEEP_EDGE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(vod_module, "KEEP_BEHIND_SECONDS", 10)
+    client = await make_proxy(settings)
+    assert await (await client.get("/movie/user/pass/1.mp4")).read() == MOVIE
+    vf = client.app[VOD].files["movie_1"]
+    before = vf.downloaded
+
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    monkeypatch.setattr(vod_module, "punch_hole", unsupported)
+    vf.trim_played()
+    actual_bytes = vf.path.stat().st_blocks * 512
+    assert vf.downloaded == before, f"accounted {vf.downloaded} bytes but {actual_bytes} still allocated"
