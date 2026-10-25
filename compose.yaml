@@ -1,0 +1,22 @@
+services:
+  xcbuffer:
+    build:
+      context: .
+      target: app
+    image: xtream-codes-buffer-proxy:local
+    container_name: xcbuffer
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8099:8080"
+    volumes:
+      - ${CACHE_PATH:-./data}:/data
+    networks:
+      - default
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so Docker never picks a range that overlaps the LAN VLANs.
+        - subnet: 172.16.252.0/24

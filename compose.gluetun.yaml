@@ -1,0 +1,41 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    container_name: gluetun-xcbuffer
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+    ports:
+      - "8099:8080"
+    volumes:
+      - ./wg0.conf:/gluetun/wireguard/wg0.conf:ro
+      - ./gluetun-auth.toml:/gluetun/auth/config.toml:ro
+
+  xcbuffer:
+    build:
+      context: .
+      target: app
+    image: xtream-codes-buffer-proxy:local
+    container_name: xcbuffer
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - GLUETUN_CONTROL_URL=http://127.0.0.1:8000
+    volumes:
+      - ${CACHE_PATH:-./data}:/data
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so Docker never picks a range that overlaps the LAN VLANs.
+        - subnet: 172.16.252.0/24

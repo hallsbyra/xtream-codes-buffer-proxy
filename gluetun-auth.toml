@@ -1,0 +1,7 @@
+# Gluetun control server roles. Only the read-only routes the status page
+# needs are open, without auth; the control server port is not published, so
+# only containers in Gluetun's network namespace can reach it.
+[[roles]]
+name = "xcbuffer-status"
+routes = ["GET /v1/vpn/status", "GET /v1/publicip/ip"]
+auth = "none"

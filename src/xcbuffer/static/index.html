@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV Buffer</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #667085; --line: #e4e7ec;
+    --accent: #2f6fed; --ok: #12805c; --warn: #b54708; --bad: #c4320a; --track: #eaecf0;
+    --have: #84a9f5; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #171b21; --text: #e6e9ee; --muted: #8b95a5; --line: #262c35;
+      --accent: #6d9bff; --ok: #3ccf91; --warn: #f5a524; --bad: #ff6b4a; --track: #262c35;
+      --have: #3a5fae;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 18px; }
+  select { font: inherit; font-size: 14px; padding: 3px 6px; border-radius: 7px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); }
+  .now { border-radius: 18px; padding: 22px 22px 24px; margin-bottom: 8px; border: 2px solid var(--line);
+         background: var(--card); }
+  .now.good { border-color: var(--ok); }
+  .now.ok { border-color: var(--warn); }
+  .now.bad { border-color: var(--bad); }
+  .now .what { font-size: 15px; color: var(--muted); }
+  .now .name { font-size: 24px; font-weight: 650; margin: 2px 0 14px; overflow-wrap: anywhere; }
+  .now .amount { font-size: 72px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; }
+  .now .amount small { font-size: 22px; font-weight: 600; color: var(--muted); margin-left: 8px; }
+  .now .verdict { display: inline-block; margin-top: 16px; font-size: 20px; font-weight: 650;
+                  padding: 8px 16px; border-radius: 99px; color: #fff; background: var(--muted); }
+  .now.good .verdict { background: var(--ok); }
+  .now.ok .verdict { background: var(--warn); }
+  .now.bad .verdict { background: var(--bad); }
+  .tl { margin-top: 18px; }
+  .tl-bar { position: relative; height: 26px; background: var(--track); border-radius: 8px; overflow: hidden; }
+  .tl-bar .have { position: absolute; top: 0; bottom: 0; background: var(--have); opacity: .45; }
+  .tl-bar .played { position: absolute; top: 0; bottom: 0; left: 0; background: var(--muted); opacity: .25; }
+  .tl-bar .ahead { position: absolute; top: 0; bottom: 0; background: var(--muted); }
+  .now.good .tl-bar .ahead { background: var(--ok); }
+  .now.ok .tl-bar .ahead { background: var(--warn); }
+  .now.bad .tl-bar .ahead { background: var(--bad); }
+  .tl-bar .here { position: absolute; top: -3px; bottom: -3px; width: 4px; margin-left: -2px;
+                  background: var(--text); border-radius: 2px; }
+  .tl-labels { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px;
+               font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tl-labels .mid { color: var(--text); font-weight: 600; text-align: center; }
+  .now .fill { height: 18px; background: var(--track); border-radius: 9px; overflow: hidden; margin-top: 16px; }
+  .now .fill div { height: 100%; border-radius: 9px; background: var(--muted); transition: width .6s; }
+  .now.good .fill div { background: var(--ok); }
+  .now.ok .fill div { background: var(--warn); }
+  .now.bad .fill div { background: var(--bad); }
+  .now .hint { margin-top: 10px; color: var(--muted); font-size: 14px; }
+  h2.details { margin-top: 40px; font-size: 15px; }
+  .meter { height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .meter div { height: 100%; background: var(--ok); }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+       margin: 26px 0 10px; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .title { font-weight: 600; font-size: 16px; flex: 1 1 auto; min-width: 0;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line);
+           color: var(--muted); white-space: nowrap; }
+  .badge.ok { color: var(--ok); border-color: currentColor; }
+  .badge.warn { color: var(--warn); border-color: currentColor; }
+  .badge.bad { color: var(--bad); border-color: currentColor; }
+  .big { font-size: 30px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .big small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 6px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px 16px;
+           margin-top: 12px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-variant-numeric: tabular-nums; font-weight: 550; }
+  .bar { position: relative; height: 12px; background: var(--track); border-radius: 6px;
+         overflow: hidden; margin-top: 12px; }
+  .bar .seg { position: absolute; top: 0; bottom: 0; background: var(--have); }
+  .bar .pos { position: absolute; top: -2px; bottom: -2px; width: 3px; background: var(--text);
+              border-radius: 2px; }
+  .viewer { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .viewer .who { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+           border: 1px solid var(--line); background: transparent; color: var(--text); }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .empty { color: var(--muted); font-size: 14px; padding: 6px 2px; }
+  .note { color: var(--warn); font-size: 13px; margin-top: 8px; }
+  .err { color: var(--bad); font-size: 13px; margin-top: 8px; word-break: break-word; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+  .setup { border-color: var(--warn); }
+  code { font-family: var(--mono); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>IPTV Buffer</h1>
+    <span class="sub" id="upstream"></span>
+  </header>
+  <section id="now" class="now"><div class="what">Loading status…</div></section>
+  <h2 class="details">Details</h2>
+  <div id="setup"></div>
+  <div class="card">
+    <div class="row">
+      <div class="title" style="font-weight:500">Buffer length</div>
+      <label class="sub">
+        <select id="buffer" onchange="setBuffer(this.value)">
+          <option>10</option><option>20</option><option>30</option><option>45</option>
+          <option>60</option><option>90</option><option>120</option>
+        </select> min
+      </label>
+    </div>
+    <div class="sub">How far ahead of what you watch it downloads, and how far behind live you can be.</div>
+  </div>
+  <div class="card" id="vpn-card">
+    <div class="row">
+      <div class="title" style="font-weight:500">VPN</div>
+      <span class="badge" id="vpn">–</span>
+    </div>
+    <div class="sub" id="vpn-detail"></div>
+    <div class="err" id="vpn-error"></div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <div class="title" style="font-weight:500">Provider connection</div>
+      <span class="badge" id="slot">–</span>
+    </div>
+    <div class="sub" id="viewer"></div>
+  </div>
+  <h2>Live</h2>
+  <div id="live"><div class="empty">No channel is running.</div></div>
+  <h2>Movies and episodes</h2>
+  <div id="vod"><div class="empty">Nothing in the cache.</div></div>
+  <footer id="cache"></footer>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function bytes(n) {
+  if (n == null) return "–";
+  const u = ["B", "kB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+const mbit = (bps) => `${(bps * 8 / 1e6).toFixed(1)} Mbit/s`;
+function dur(s) {
+  if (s == null || !isFinite(s)) return "–";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if (h) return `${h} h ${m} min`;
+  if (m) return sec ? `${m} min ${sec} s` : `${m} min`;
+  return `${sec} s`;
+}
+
+const LIVE_STATE = {
+  connecting: ["Connecting", "warn"], streaming: ["Receiving", "ok"], reconnecting: ["Reconnecting", "warn"],
+  vpn_down: ["Waiting for VPN", "bad"],
+  stopped: ["Stopped", ""], error: ["Error", "bad"],
+};
+const VOD_STATE = {
+  idle: ["Waiting", ""], starting: ["Starting", "warn"], downloading: ["Downloading", "ok"], vpn_down: ["Waiting for VPN", "bad"],
+  full: ["Buffer full", "ok"], stopped: ["Stopped", ""],
+  retrying: ["Retrying", "warn"], paused: ["Paused", ""], complete: ["Complete", "ok"], error: ["Error", "bad"],
+};
+const badge = ([text, cls]) => `<span class="badge ${cls}">${esc(text)}</span>`;
+
+function speedBadge(speed) {
+  if (speed == null) return "";
+  const cls = speed >= 0.99 ? "ok" : speed >= 0.9 ? "warn" : "bad";
+  return badge([`${speed.toFixed(2)}× real time`, cls]);
+}
+
+function liveCard(ch) {
+  const viewers = ch.viewers.map((v) => `
+    <div class="viewer">
+      <div class="who">${esc(v.peer)} · connected for ${dur(v.connected_for)}${v.waiting ? " · waiting for the provider" : ""}</div>
+      <div class="big">${dur(v.behind_seconds)}<small>ahead of you (how far behind live you are)</small></div>
+    </div>`).join("");
+  const slow = ch.speed != null && ch.speed < 0.995
+    ? `<div class="note">The provider sends ${ch.speed.toFixed(2)}× real time, a bit slower than the TV plays.
+       Without a buffer it stutters. Pause for a while to fall behind live and get a margin.</div>` : "";
+  const idle = !ch.viewers.length && ch.idle_for != null
+    ? `<div class="note">Nobody is watching – still buffering in the background (last viewer ${dur(ch.idle_for)} ago).</div>` : "";
+  return `
+    <div class="card">
+      <div class="row">
+        <div class="title">${esc(ch.name || "Channel " + ch.id)}</div>
+        ${speedBadge(ch.speed)} ${badge(LIVE_STATE[ch.state] || [ch.state, ""])}
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">From the provider</div><div class="v">${mbit(ch.rate)}${ch.speed != null ? ` · ${ch.speed.toFixed(2)}×` : ""}</div></div>
+        <div class="stat"><div class="k">Video saved in total</div><div class="v">${dur(ch.buffer_seconds)}</div></div>
+        <div class="stat"><div class="k">Channel started</div><div class="v">${dur(ch.uptime)} ago</div></div>
+      </div>
+      ${viewers}${slow}${idle}
+      ${ch.error ? `<div class="err">${esc(ch.error)}</div>` : ""}
+      <div class="row" style="margin-top:12px">
+        ${ch.viewers.length ? `<button onclick="act('live/${encodeURIComponent(ch.id)}/jump')">Jump to live</button>` : ""}
+        <button class="danger" onclick="act('live/${encodeURIComponent(ch.id)}/stop')">Stop</button>
+      </div>
+    </div>`;
+}
+
+function rangeBar(item) {
+  if (!item.size) return "";
+  const segs = item.ranges.map(([a, b]) =>
+    `<div class="seg" style="left:${a / item.size * 100}%;width:${(b - a) / item.size * 100}%"></div>`).join("");
+  const marks = `<div class="pos" style="left:calc(${item.play_pos / item.size * 100}% - 1px)"></div>`;
+  return `<div class="bar">${segs}${marks}</div>`;
+}
+
+function vodCard(item) {
+  const est = item.duration_known ? "" : "≈ ";
+  const title = item.name || `${item.kind === "series" ? "Episode" : "Movie"} ${item.id}`;
+  const fill = item.window_seconds ? Math.min(item.ahead_seconds / item.window_seconds, 1) * 100 : 0;
+  const waiting = item.viewers.some((v) => v.waiting);
+  const who = item.viewers.map((v) => esc(v.peer)).join(", ");
+  const buffer = item.current ? `
+    <div class="viewer">
+      <div class="who">${who ? who + " · " : ""}at ${est}${dur(item.play_seconds)}${item.duration ? " of " + dur(item.duration) : ""}${waiting ? " · waiting for data" : ""}</div>
+      <div class="big">${est}${dur(item.ahead_seconds)}<small>buffered ahead of you, max ${dur(item.window_seconds)}</small></div>
+      <div class="meter"><div style="width:${fill}%"></div></div>
+    </div>` : "";
+  return `
+    <div class="card">
+      <div class="row">
+        <div class="title">${esc(title)}</div>
+        ${item.realtime_ratio != null ? speedBadge(item.realtime_ratio) : ""}
+        ${badge(VOD_STATE[item.state] || [item.state, ""])}
+      </div>
+      ${rangeBar(item)}
+      <div class="stats">
+        <div class="stat"><div class="k">On disk</div><div class="v">${bytes(item.downloaded)} of ${bytes(item.size)}</div></div>
+        <div class="stat"><div class="k">Speed</div><div class="v">${item.state === "downloading" ? mbit(item.rate) : "–"}</div></div>
+        <div class="stat"><div class="k">Length</div><div class="v">${item.duration ? dur(item.duration) : "unknown"}</div></div>
+      </div>
+      ${buffer}
+      ${item.duration_known ? "" : `<div class="note">The length is unknown, so the minutes are estimates.</div>`}
+      ${item.capped ? `<div class="note">The cache is full – only downloading what is played.</div>` : ""}
+      ${item.error ? `<div class="err">${esc(item.error)}</div>` : ""}
+      <div class="row" style="margin-top:12px">
+        <button class="danger" onclick="act('vod/${encodeURIComponent(item.key)}/delete')">Remove</button>
+      </div>
+    </div>`;
+}
+
+const VPN_STATE = { running: "Up", stopped: "Down", stopping: "Stopping", starting: "Starting",
+                    crashed: "Crashed", unreachable: "Gluetun not answering" };
+
+function renderVpn(v) {
+  const card = $("vpn-card"), b = $("vpn");
+  if (!v) {
+    b.textContent = "Not configured"; b.className = "badge warn";
+    $("vpn-detail").textContent = "Provider traffic goes out directly, without VPN and without kill switch.";
+    $("vpn-error").textContent = "";
+    return;
+  }
+  b.textContent = VPN_STATE[v.status] || v.status || "Unknown";
+  b.className = "badge " + (v.up ? "ok" : "bad");
+  card.style.borderColor = v.up ? "" : "var(--bad)";
+  $("vpn-detail").textContent = v.up
+    ? `Out via ${v.public_ip || "unknown IP"}${v.location ? " · " + v.location : ""} · up for ${dur(v.changed_ago)}`
+    : `Kill switch active: no traffic reaches the provider (down for ${dur(v.changed_ago)}).`;
+  $("vpn-error").textContent = v.error || "";
+}
+
+function clock(sec) {
+  if (sec == null || !isFinite(sec)) return "–";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), x = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(x).padStart(2, "0")}` : `${m}:${String(x).padStart(2, "0")}`;
+}
+
+function timeline({ segments, played, here, aheadTo, left, right, mid }) {
+  const pct = (f) => `${Math.max(0, Math.min(f, 1)) * 100}%`;
+  const have = (segments || []).map(([a, b]) => `<div class="have" style="left:${pct(a)};width:${pct(b - a)}"></div>`).join("");
+  return `
+    <div class="tl">
+      <div class="tl-bar">
+        ${have}
+        <div class="played" style="width:${pct(played)}"></div>
+        <div class="ahead" style="left:${pct(here)};width:${pct(aheadTo - here)}"></div>
+        <div class="here" style="left:${pct(here)}"></div>
+      </div>
+      <div class="tl-labels"><span>${esc(left)}</span><span class="mid">${esc(mid)}</span><span>${esc(right)}</span></div>
+    </div>`;
+}
+
+function nowPlaying(s) {
+  if (s.vpn && !s.vpn.up)
+    return { level: "bad", what: "Not working right now", name: "The TV's internet connection is down",
+             verdict: "Wait a while", hint: "Nothing can play until it is back." };
+  const content = (s.viewer || {}).content || "";
+  const [kind, id] = content.split(" ");
+  const window = s.buffer_minutes * 60;
+  if (kind === "live") {
+    const ch = s.live.find((c) => c.id === id);
+    const hls = s.hls.find((h) => h.id === id);
+    const name = (ch && ch.name) || (hls && hls.name) || `Channel ${id}`;
+    if (ch) {
+      const seconds = ch.viewers.length ? Math.max(...ch.viewers.map((v) => v.behind_seconds)) : ch.buffer_seconds;
+      const span = Math.max(window, ch.buffer_seconds, 1);
+      const oldest = 1 - ch.buffer_seconds / span, here = 1 - seconds / span;
+      return { what: "Watching TV", name, seconds, window,
+               timeline: { segments: [[oldest, 1]], played: here, here, aheadTo: 1,
+                           left: `−${dur(span)}`, right: "Live",
+                           mid: seconds >= 1 ? `You are ${dur(seconds)} behind live` : "You are at live" } };
+    }
+    if (hls) return { level: "idle", what: "Watching TV", name, verdict: "No buffer on this channel",
+                      hint: "The app fetches this channel as HLS. Choose MPEG-TS as stream format in the app to get a buffer." };
+  }
+  if (kind === "movie" || kind === "series") {
+    const item = s.vod.find((v) => v.key === `${kind}_${id}`);
+    if (item) {
+      const name = item.name || (kind === "series" ? "Episode" : "Movie");
+      const size = item.size || 1, total = item.duration;
+      const at = (bytes) => total ? bytes / size * total : null;
+      const here = item.play_pos / size, aheadTo = (item.play_pos + item.ahead_bytes) / size;
+      return { what: kind === "series" ? "Watching an episode" : "Watching a movie", name,
+               seconds: item.ahead_seconds, window, all: item.rest_downloaded,
+               timeline: { segments: item.ranges.map(([a, b]) => [a / size, b / size]), played: here, here, aheadTo,
+                           left: "0:00", right: total ? clock(total) : "end",
+                           mid: total ? `You are at ${clock(at(item.play_pos))} · buffered to ${clock(at(item.play_pos + item.ahead_bytes))}`
+                                      : `You are at ${Math.round(here * 100)} %` } };
+    }
+  }
+  return { level: "idle", what: "Nothing is playing", name: "", verdict: "Start something on the TV" };
+}
+
+function renderNow(s) {
+  const n = nowPlaying(s);
+  let level = n.level, verdict = n.verdict, hint = n.hint || "";
+  if (n.seconds != null) {
+    if (n.all || n.seconds >= 300) { level = "good"; verdict = "Good – just watch"; }
+    else if (n.seconds >= 60) { level = "ok"; verdict = "Pause for a while"; hint = hint || "That gives it time to download more."; }
+    else { level = "bad"; verdict = "Pause and wait"; hint = hint || "Press pause and wait until it turns green."; }
+    if (n.all) hint = "The rest of the movie is already downloaded.";
+  }
+  const amount = n.seconds == null ? "" : n.seconds >= 60
+    ? `${Math.floor(n.seconds / 60)}<small>min buffered</small>`
+    : `${Math.round(n.seconds)}<small>sec buffered</small>`;
+  const fill = n.timeline ? timeline(n.timeline) : "";
+  const el = $("now");
+  el.className = "now " + (level || "");
+  el.innerHTML = `
+    <div class="what">${esc(n.what)}</div>
+    ${n.name ? `<div class="name">${esc(n.name)}</div>` : ""}
+    ${amount ? `<div class="amount">${amount}</div>` : ""}
+    ${fill}
+    ${verdict ? `<div class="verdict">${esc(verdict)}</div>` : ""}
+    ${hint ? `<div class="hint">${esc(hint)}</div>` : ""}`;
+}
+
+async function setBuffer(minutes) {
+  try {
+    await fetch("/_proxy/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ buffer_minutes: Number(minutes) }) });
+  } catch (e) {}
+  refresh();
+}
+
+async function act(path) {
+  try { await fetch(`/_proxy/${path}`, { method: "POST" }); } catch (e) {}
+  refresh();
+}
+
+async function refresh() {
+  let s;
+  try {
+    const r = await fetch("/_proxy/status", { cache: "no-store" });
+    s = await r.json();
+  } catch (e) {
+    $("slot").textContent = "The proxy is not answering";
+    $("slot").className = "badge bad";
+    return;
+  }
+  $("upstream").textContent = s.upstream ? `→ ${s.upstream}${s.via_proxy ? " via HTTP proxy" : ""}` : "";
+  $("setup").innerHTML = s.configured ? "" :
+    `<div class="card setup">No provider set. Set <code>UPSTREAM_URL</code> in <code>.env</code> and restart the container.</div>`;
+  renderNow(s);
+  renderVpn(s.vpn);
+  const sel = $("buffer");
+  if (document.activeElement !== sel) {
+    const m = String(s.buffer_minutes);
+    if (![...sel.options].some((o) => o.value === m)) sel.add(new Option(m));
+    sel.value = m;
+  }
+  const v = s.viewer || {};
+  $("viewer").textContent = v.owner
+    ? `Last: ${v.owner} · ${v.content}` +
+      Object.keys(v.displaced || {}).map((p) => ` · ${p} displaced`).join("")
+    : "";
+  $("slot").textContent = s.slot ? `In use: ${s.slot}` : "Free";
+  $("slot").className = "badge " + (s.slot ? "ok" : "");
+  $("live").innerHTML = s.live.length ? s.live.map(liveCard).join("") : `<div class="empty">No channel is running.</div>`;
+  $("vod").innerHTML = s.vod.length ? s.vod.map(vodCard).join("") : `<div class="empty">Nothing in the cache.</div>`;
+  const c = s.cache;
+  $("cache").textContent = `Cache: ${bytes(c.used)} of ${bytes(c.budget)} · ${bytes(c.free)} free on disk`;
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
