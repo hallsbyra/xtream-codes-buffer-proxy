@@ -70,12 +70,16 @@ class Passthrough:
         self._opening = asyncio.Lock()
         self._idle = asyncio.Event()
         self._idle.set()
+        # A connection still waiting for the provider's response headers
+        self._pending: asyncio.Future | None = None
 
     def is_idle(self) -> bool:
         return False
 
     def preempt(self) -> None:
         self._preempted = True
+        if self._pending:
+            self._pending.cancel()
         for resp in list(self.active):
             resp.close()
         self._schedule_release(0)
@@ -94,7 +98,18 @@ class Passthrough:
                     for resp in list(self.active):
                         resp.close()
                     self.active.clear()
-            resp = await connect()
+            self._pending = asyncio.ensure_future(connect())
+            try:
+                resp = await self._pending
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+                raise UpstreamError(503, "another request took the provider connection") from None
+            finally:
+                self._pending = None
+            if self._preempted:
+                resp.close()
+                raise UpstreamError(503, "another request took the provider connection")
             self.active.add(resp)
             self._idle.clear()
             return resp
@@ -115,6 +130,9 @@ class Passthrough:
         # A new relay may have started between scheduling and running.
         if self.active and not self._preempted:
             return
+        if self._pending:
+            # Let the cancelled connection close before someone else opens one.
+            await asyncio.wait([self._pending])
         await self.slot.release(self)
 
 

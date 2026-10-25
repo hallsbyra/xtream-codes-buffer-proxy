@@ -23,17 +23,23 @@ class ViewerGate:
         self.content: str | None = None
         self.since = 0.0
         self._displaced: dict[str, float] = {}
+        # Other devices watching the current content with the owner
+        self._sharing: set[str] = set()
         # Called with the new content when it changes
         self.on_switch: Callable[[str], None] | None = None
 
     def admit(self, peer: str, content: str) -> bool:
         now = time.time()
         if content == self.content:
+            if peer != self.owner:
+                self._sharing.add(peer)
             return True
         if self._displaced.get(peer, 0) > now:
             return False
-        if self.owner is not None and self.owner != peer:
-            self._displaced[self.owner] = now + self.displaced_seconds
+        for other in self._sharing | {self.owner}:
+            if other is not None and other != peer:
+                self._displaced[other] = now + self.displaced_seconds
+        self._sharing.clear()
         self._displaced.pop(peer, None)
         self.owner = peer
         self.content = content

@@ -235,6 +235,8 @@ class VodFile:
         self._kick()
 
     async def wait_ready(self, timeout: float = 90) -> None:
+        if self.uncacheable:
+            raise NotCacheable()
         if self.size is not None:
             return
         self._ready.clear()

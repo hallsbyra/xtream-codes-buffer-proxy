@@ -3,7 +3,10 @@
 import asyncio
 from unittest.mock import patch
 
-from conftest import MOVIE, status
+from aiohttp import web
+
+from conftest import MOVIE, status, ts_packets
+from xcbuffer import app as app_module
 from xcbuffer.app import CATALOG, SLOT, VOD
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
@@ -79,3 +82,91 @@ async def test_slot_released_when_vod_metadata_write_fails(provider, settings, m
         assert client.app[SLOT].holder.label == "live 5"
     live.close()
     movie.close()
+
+# --- second review ---
+
+
+async def test_switch_while_relay_is_waiting_for_headers_keeps_one_connection(
+    provider, settings, make_proxy, aiohttp_server,
+):
+    opened = asyncio.Event()
+    headers_allowed = asyncio.Event()
+
+    async def delayed_relay(request):
+        provider._enter(request)
+        opened.set()
+        try:
+            await headers_allowed.wait()
+            resp = web.StreamResponse()
+            await resp.prepare(request)
+            while True:
+                await resp.write(ts_packets(0, 250))
+                await asyncio.sleep(.01)
+        finally:
+            provider.open_streams -= 1
+
+    app = web.Application()
+    app.router.add_get("/slow-relay", delayed_relay)
+    app.router.add_get("/movie/{user}/{password}/{name}", provider.movie)
+    app.router.add_get("/player_api.php", provider.player_api)
+    server = await aiohttp_server(app)
+    client = await make_proxy(settings, upstream_url=str(server.make_url("")).rstrip("/"))
+    provider.movie_delay = .05
+    relay = asyncio.create_task(client.get("/slow-relay"))
+    await asyncio.wait_for(opened.wait(), 2)
+    movie = await asyncio.wait_for(client.get("/movie/user/pass/1.mp4"), 2)
+    await movie.content.readexactly(100)
+    concurrent = provider.max_open_streams
+    headers_allowed.set()
+    relay_resp = await asyncio.wait_for(relay, 2)
+    relay_status = relay_resp.status
+    relay_resp.close()
+    movie.close()
+    assert concurrent == 1, "pending relay survives preemption and overlaps new movie"
+    # The movie asked last, so the relay that was still connecting lost.
+    assert relay_status == 503
+
+
+async def test_second_request_to_chunked_vod_is_relayed(settings, make_proxy, aiohttp_server, monkeypatch):
+    async def chunked(request):
+        resp = web.StreamResponse(headers={"Content-Type": "video/mp4"})
+        await resp.prepare(request)
+        await resp.write(b"video data")
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/movie/{user}/{password}/{name}", chunked)
+    server = await aiohttp_server(app)
+    client = await make_proxy(settings, upstream_url=str(server.make_url("")).rstrip("/"))
+    url = "/movie/user/pass/1.mp4"
+    first = await client.get(url)
+    assert await first.read() == b"video data"
+    # Exercise the real timeout path without waiting for its 90-second default.
+    vf = next(iter(client.app[app_module.VOD].files.values()))
+    wait_ready = vf.wait_ready
+
+    async def shorter_wait():
+        return await wait_ready(timeout=.05)
+
+    monkeypatch.setattr(vf, "wait_ready", shorter_wait)
+    second = await asyncio.wait_for(client.get(url), 2)
+    assert second.status == 200
+    assert await second.read() == b"video data"
+
+
+async def test_sharing_tv_is_also_displaced_on_switch(provider, settings, make_proxy, monkeypatch):
+    monkeypatch.setattr(app_module, "peer_of", lambda req: req.headers.get("X-Peer", "tv-a"))
+    provider.movie_delay = .05
+    client = await make_proxy(settings)
+    a = await client.get("/live/user/pass/5.ts", headers={"X-Peer": "tv-a"})
+    await a.content.readexactly(188)
+    b = await client.get("/live/user/pass/5.ts", headers={"X-Peer": "tv-b"})
+    await b.content.readexactly(188)
+    movie = await client.get("/movie/user/pass/1.mp4", headers={"X-Peer": "tv-a"})
+    await movie.content.readexactly(100)
+    b_reconnect = await client.get("/live/user/pass/5.ts", headers={"X-Peer": "tv-b"})
+    response_status = b_reconnect.status
+    viewer = (await status(client))["viewer"]
+    for response in (a, b, movie, b_reconnect):
+        response.close()
+    assert response_status == 503, f"auto-reconnect stole slot: {viewer}"
