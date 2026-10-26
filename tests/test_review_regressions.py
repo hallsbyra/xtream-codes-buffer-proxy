@@ -186,7 +186,7 @@ async def test_preempt_relay_while_another_relay_waits_for_handover(provider, se
     client = await make_proxy(settings)
     a = await client.get("/live/user/pass/5.raw")
     await a.content.readexactly(188)
-    b = asyncio.create_task(client.get("/live/user/pass/6.raw"))
+    b = asyncio.create_task(client.get("/live/user/pass/5.raw"))
     await asyncio.sleep(.05)
     relay = client.app[RELAY]
     assert relay._opening.locked() and relay._pending is None and relay.active
@@ -277,17 +277,18 @@ async def test_relay_queued_before_switch_does_not_take_the_connection(provider,
     client = await make_proxy(settings)
     a = await client.get("/live/user/pass/5.raw")
     await a.content.readexactly(188)
-    # b waits for a to finish; c waits behind b. Both were admitted before the switch.
-    b = asyncio.create_task(client.get("/live/user/pass/6.raw"))
-    c = asyncio.create_task(client.get("/live/user/pass/7.raw"))
+    # Same stream, so b waits for a to finish and c waits behind b. Both were
+    # admitted before the switch.
+    b = asyncio.create_task(client.get("/live/user/pass/5.raw"))
+    c = asyncio.create_task(client.get("/live/user/pass/5.raw"))
     await asyncio.sleep(.1)
     movie = await asyncio.wait_for(client.get(MOVIE_URL), 15)
     body = await asyncio.wait_for(movie.read(), 15)
     responses = [a, movie] + [await asyncio.wait_for(t, 3) for t in (b, c)]
     for response in responses:
         response.close()
-    stale = [p for p in provider.stream_requests if "/7.raw" in p]
-    assert not stale, "a relay queued before the switch connected after it"
+    relayed = [p for p in provider.stream_requests if "/5.raw" in p]
+    assert len(relayed) == 1, f"a relay queued before the switch connected after it: {relayed}"
     assert body == MOVIE
 
 
@@ -394,3 +395,50 @@ async def test_tail_probe_keeps_downloading_for_waiting_reader(provider, setting
     first.close()
     assert not stuck.is_set(), "a reader was waiting but the downloader found nothing to fetch"
     assert body == MOVIE[1024:]
+
+
+async def test_different_catchup_programs_are_different_content(
+    provider, settings, make_proxy, monkeypatch, aiohttp_server
+):
+    monkeypatch.setattr(app_module, "peer_of", lambda req: req.headers.get("X-Peer", "tv-a"))
+    app = web.Application()
+    app.router.add_get("/timeshift/{user}/{password}/{duration}/{start}/{name}", provider.live)
+    server = await aiohttp_server(app)
+    client = await make_proxy(settings, upstream_url=str(server.make_url("")).rstrip("/"))
+    program_a = "/timeshift/user/pass/60/2026-10-26:12-00/5.ts"
+    program_b = "/timeshift/user/pass/60/2026-10-26:12-00/6.ts"
+    first = await client.get(program_a, headers={"X-Peer": "tv-a"})
+    await first.content.readexactly(188)
+    second = await client.get(program_b, headers={"X-Peer": "tv-b"})
+    await second.content.readexactly(188)
+    # tv-a's player reconnects on its own after losing the connection.
+    retry = await client.get(program_a, headers={"X-Peer": "tv-a"})
+    retry_status = retry.status
+    for response in (first, second, retry):
+        response.close()
+    assert retry_status == 503, "a displaced TV took another program back because both were 'relay'"
+
+
+async def test_old_hls_segment_does_not_play_for_the_new_channel(settings, make_proxy, aiohttp_server):
+    async def playlist(request):
+        channel = request.match_info["name"].split(".")[0]
+        return web.Response(text=f"#EXTM3U\n#EXTINF:4,\n/hls/{channel}.ts\n",
+                            content_type="application/vnd.apple.mpegurl")
+
+    async def segment(request):
+        return web.Response(body=f"channel {request.match_info['channel']}".encode())
+
+    app = web.Application()
+    app.router.add_get("/live/{user}/{password}/{name}", playlist)
+    app.router.add_get("/hls/{channel}.ts", segment)
+    server = await aiohttp_server(app)
+    client = await make_proxy(settings, upstream_url=str(server.make_url("")).rstrip("/"))
+    channel_5 = await (await client.get("/live/user/pass/5.m3u8")).text()
+    old_segment = next(line for line in channel_5.splitlines() if line.startswith("/_relay/"))
+    await (await client.get("/live/user/pass/6.m3u8")).read()
+    late = await client.get(old_segment)
+    late_status = late.status
+    late.close()
+    # A late segment of the old channel neither plays as channel 6 nor switches back.
+    assert late_status == 503
+    assert client.app[CONNECTION].content == "live 6 hls"

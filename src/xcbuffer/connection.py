@@ -59,13 +59,16 @@ class ProviderConnection:
 
     # --- devices ----------------------------------------------------------------
 
-    def admit(self, peer: str, content: str) -> bool:
+    def admit(self, peer: str, content: str, *, may_switch: bool = True) -> bool:
+        """May peer use the connection for content? Requests that only
+        continue earlier content, such as HLS segments, pass may_switch=False
+        so a late one cannot switch back to what was left."""
         now = time.time()
         if content == self.content:
             if peer != self.owner:
                 self._sharing.add(peer)
             return True
-        if self._displaced.get(peer, 0) > now:
+        if not may_switch or self._displaced.get(peer, 0) > now:
             return False
         for other in self._sharing | {self.owner}:
             if other is not None and other != peer:

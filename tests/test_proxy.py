@@ -5,7 +5,7 @@ import os
 from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
-from xcbuffer.app import CONNECTION, VOD, VPN
+from xcbuffer.app import CONNECTION, VOD, VPN, _relay_token
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -203,7 +203,8 @@ async def test_hls_playlist_is_relayed_through_proxy(provider, settings, make_pr
     first = await client.get(segments[0])
     assert first.status == 200
     assert (await first.read())[0] == 0x47
-    assert (await client.get("/_relay/aHR0cDovL2V2aWwuZXhhbXBsZS94")).status == 403
+    evil = _relay_token("http://evil.example/x", "live 5 hls")
+    assert (await client.get(f"/_relay/{evil}")).status == 403
 
 
 async def test_vpn_down_blocks_all_provider_traffic(provider, gluetun, settings, make_proxy):

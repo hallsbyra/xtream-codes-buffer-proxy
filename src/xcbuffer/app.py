@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -194,10 +195,10 @@ def peer_of(request: web.Request) -> str:
     return request.remote or "?"
 
 
-def _busy(request: web.Request, content: str) -> web.Response | None:
+def _busy(request: web.Request, content: str, *, may_switch: bool = True) -> web.Response | None:
     """Refuse a device that just lost the connection to another one."""
     connection = request.app[CONNECTION]
-    if connection.admit(peer_of(request), content):
+    if connection.admit(peer_of(request), content, may_switch=may_switch):
         return None
     return web.Response(status=503, text=f"Busy: {connection.owner} is watching {connection.content}.")
 
@@ -269,7 +270,7 @@ async def vod(request: web.Request) -> web.StreamResponse:
     try:
         await vf.wait_ready()
     except NotCacheable:
-        return await relay(request)
+        return await relay(request, content=f"{kind} {stream_id}")
     except UpstreamError as exc:
         return web.Response(status=exc.status, text=str(exc))
     assert vf.size is not None
@@ -393,18 +394,33 @@ async def short_live(request: web.Request) -> web.StreamResponse:
 # --- plain relay ------------------------------------------------------------------------------
 
 
-def _relay_token(url: str) -> str:
-    return base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+def _relay_content(url: str) -> str:
+    """Content label of a stream relayed as is, such as a catch-up program.
+    The URL holds the credentials, so only a digest of it is shown."""
+    return "relay " + hashlib.sha256(url.encode()).hexdigest()[:10]
 
 
-def _rewrite_playlist(app: web.Application, text: str, base_url: str) -> str:
+def _relay_token(url: str, content: str) -> str:
+    """A playlist entry remembers the content of its playlist."""
+    return base64.urlsafe_b64encode(f"{content}\n{url}".encode()).decode().rstrip("=")
+
+
+def _parse_relay_token(token: str) -> tuple[str, str]:
+    """(content, url); raises ValueError for a malformed token."""
+    content, newline, url = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode().partition("\n")
+    if not newline:
+        raise ValueError(token)
+    return content, url
+
+
+def _rewrite_playlist(app: web.Application, text: str, base_url: str, content: str) -> str:
     """Send every URL in an HLS playlist back through /_relay/."""
     allowed = app[RELAY_HOSTS]
 
     def through_proxy(url: str) -> str:
         absolute = urljoin(base_url, url.strip())
         allowed.add(urlsplit(absolute).netloc)
-        return f"/_relay/{_relay_token(absolute)}"
+        return f"/_relay/{_relay_token(absolute, content)}"
 
     lines = []
     for line in text.splitlines():
@@ -416,14 +432,17 @@ def _rewrite_playlist(app: web.Application, text: str, base_url: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def relay(request: web.Request, url: str | None = None, content: str = "relay") -> web.StreamResponse:
+async def relay(
+    request: web.Request, url: str | None = None, content: str | None = None, *, may_switch: bool = True
+) -> web.StreamResponse:
     if blocked := _unavailable(request):
         return blocked
     upstream = request.app[UPSTREAM]
     url = url or upstream.url(request.path_qs)
+    content = content or _relay_content(url)
     path = urlsplit(url).path.lower()
     holds_slot = not path.endswith(IMAGE_SUFFIXES)
-    if holds_slot and (busy := _busy(request, content)):
+    if holds_slot and (busy := _busy(request, content, may_switch=may_switch)):
         return busy
     passthrough = request.app[RELAY]
     extra = {"Range": request.headers["Range"]} if "Range" in request.headers else {}
@@ -442,7 +461,7 @@ async def relay(request: web.Request, url: str | None = None, content: str = "re
         content_type = up.headers.get("Content-Type", "")
         if "mpegurl" in content_type.lower() or str(up.url.path).lower().endswith(".m3u8"):
             text = (await up.read()).decode("utf-8", "replace")
-            body = _rewrite_playlist(request.app, text, str(up.url))
+            body = _rewrite_playlist(request.app, text, str(up.url), content)
             return web.Response(status=up.status, text=body, content_type="application/vnd.apple.mpegurl")
         headers = {k: up.headers[k] for k in RELAY_RESPONSE_HEADERS if k in up.headers}
         if up.content_length is not None and "Content-Encoding" not in up.headers:
@@ -464,16 +483,16 @@ async def relay(request: web.Request, url: str | None = None, content: str = "re
 async def relay_token(request: web.Request) -> web.StreamResponse:
     token = request.match_info["token"]
     try:
-        url = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        content, url = _parse_relay_token(token)
     except ValueError:
         raise web.HTTPNotFound() from None
     if urlsplit(url).netloc not in request.app[RELAY_HOSTS]:
         raise web.HTTPForbidden()
     hls = request.app[HLS].get(peer_of(request))
-    if hls:
+    if hls and content == _hls_content(hls[0]):
         request.app[HLS][peer_of(request)] = (hls[0], time.time())
-        return await relay(request, url, content=_hls_content(hls[0]))
-    return await relay(request, url)
+    # Segments continue their playlist; a late one must not switch back to it.
+    return await relay(request, url, content, may_switch=False)
 
 
 async def fallback(request: web.Request) -> web.StreamResponse:
