@@ -319,6 +319,9 @@ function nowPlaying(s) {
     if (hls) return { level: "idle", what: "Watching TV", name, verdict: "No buffer on this channel",
                       hint: "The app fetches this channel as HLS. Choose MPEG-TS as stream format in the app to get a buffer." };
   }
+  if (kind === "timeshift")
+    return { level: "idle", what: "Watching catch-up", name: s.viewer.name || `Channel ${id}`,
+             verdict: "No buffer for catch-up", hint: "Catch-up is passed straight through from the provider." };
   if (kind === "movie" || kind === "series") {
     const item = s.vod.find((v) => v.key === `${kind}_${id}`);
     if (item) {
@@ -333,6 +336,8 @@ function nowPlaying(s) {
                            mid: total ? `You are at ${clock(at(item.play_pos))} · buffered to ${clock(at(item.play_pos + item.ahead_bytes))}`
                                       : `You are at ${Math.round(here * 100)} %` } };
     }
+    return { level: "idle", what: kind === "series" ? "Watching an episode" : "Watching a movie", name: "",
+             verdict: "No buffer for this title", hint: "The provider does not let the proxy download it in parts." };
   }
   return { level: "idle", what: "Nothing is playing", name: "", verdict: "Start something on the TV" };
 }

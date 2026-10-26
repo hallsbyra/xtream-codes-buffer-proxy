@@ -382,3 +382,14 @@ async def test_channel_names_survive_restart(provider, settings, make_proxy):
     await tv.content.readexactly(188)
     assert (await status(client))["live"][0]["name"] == "Kanal 5"
     tv.close()
+
+
+async def test_catch_up_is_named_after_its_channel(provider, settings, make_proxy):
+    client = await make_proxy(settings)
+    await client.get("/player_api.php?username=u&password=p&action=get_live_streams")
+    await client.get("/timeshift/u/p/60/2026-10-26:15-00/5.ts")
+    viewer = (await status(client))["viewer"]
+    assert viewer["content"] == "timeshift 5 2026-10-26:15-00"
+    assert viewer["name"] == "Kanal 5"
+    await client.get("/streaming/timeshift.php?username=u&password=p&stream=5&start=2026-10-26:16-00&duration=60")
+    assert (await status(client))["viewer"]["content"] == "timeshift 5 2026-10-26:16-00"

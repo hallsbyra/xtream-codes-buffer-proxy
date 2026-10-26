@@ -14,7 +14,7 @@ import socket
 import time
 from collections.abc import Awaitable, Callable
 from importlib import resources
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -396,8 +396,18 @@ async def short_live(request: web.Request) -> web.StreamResponse:
 
 
 def _relay_content(url: str) -> str:
-    """Content label of a stream relayed as is, such as a catch-up program.
-    The URL holds the credentials, so only a digest of it is shown."""
+    """Content label of a stream relayed as is. Catch-up (timeshift) is
+    named after its channel and start; for anything else the URL holds the
+    credentials, so only a digest of it is shown."""
+    parts = urlsplit(url)
+    segments = parts.path.strip("/").split("/")
+    if len(segments) == 6 and segments[0] == "timeshift":
+        # /timeshift/{user}/{password}/{duration}/{start}/{stream_id}.ts
+        return f"timeshift {segments[5].split('.')[0]} {segments[4]}"
+    if parts.path.endswith("/timeshift.php"):
+        query = parse_qs(parts.query)
+        if "stream" in query and "start" in query:
+            return f"timeshift {query['stream'][0]} {query['start'][0]}"
     return "relay " + hashlib.sha256(url.encode()).hexdigest()[:10]
 
 
@@ -580,6 +590,11 @@ async def status(request: web.Request) -> web.Response:
             ],
         })
 
+    viewer = app[CONNECTION].snapshot()
+    kind, _, rest = (viewer["content"] or "").partition(" ")
+    if kind == "timeshift":
+        viewer["name"] = catalog.get("live", rest.split(" ")[0]).name
+
     try:
         free = shutil.disk_usage(cache.dir).free
     except OSError:
@@ -590,7 +605,7 @@ async def status(request: web.Request) -> web.Response:
         "via_proxy": bool(settings.upstream_proxy),
         "vpn": app[VPN].snapshot() if VPN in app else None,
         "slot": holder.label if holder else None,
-        "viewer": app[CONNECTION].snapshot(),
+        "viewer": viewer,
         "hls": [
             {"peer": peer, "id": sid, "name": catalog.get("live", sid).name, "last_ago": now - last}
             for peer, (sid, last) in app[HLS].items()
