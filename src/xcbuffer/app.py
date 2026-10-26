@@ -63,7 +63,8 @@ class Passthrough:
     def __init__(self, connection: ProviderConnection, linger: float) -> None:
         self.connection = connection
         self.linger = linger
-        self.active: set[aiohttp.ClientResponse] = set()
+        # The one open provider response; a relay that lost it ends quietly.
+        self.active: aiohttp.ClientResponse | None = None
         self._release: asyncio.TimerHandle | None = None
         self._preempted = False
         self._opening = asyncio.Lock()
@@ -79,8 +80,8 @@ class Passthrough:
         self._preempted = True
         if self._pending:
             self._pending.cancel()
-        for resp in list(self.active):
-            resp.close()
+        if self.active:
+            self.active.close()
         self._schedule_release(0)
 
     async def open(
@@ -98,9 +99,8 @@ class Passthrough:
                 try:
                     await asyncio.wait_for(self._idle.wait(), self.HANDOVER_SECONDS)
                 except TimeoutError:
-                    for resp in list(self.active):
-                        resp.close()
-                    self.active.clear()
+                    self.active.close()
+                    self.active = None
             if self._preempted or self.connection.holder is not self:
                 raise UpstreamError(503, "another request took the provider connection")
             self._pending = asyncio.ensure_future(connect())
@@ -115,13 +115,14 @@ class Passthrough:
             if self._preempted:
                 resp.close()
                 raise UpstreamError(503, "another request took the provider connection")
-            self.active.add(resp)
+            self.active = resp
             self._idle.clear()
             return resp
 
     def end(self, resp: aiohttp.ClientResponse | None) -> None:
-        self.active.discard(resp)
-        if not self.active:
+        if self.active is resp:
+            self.active = None
+        if self.active is None:
             self._idle.set()
             self._schedule_release(0 if self._preempted else self.linger)
 

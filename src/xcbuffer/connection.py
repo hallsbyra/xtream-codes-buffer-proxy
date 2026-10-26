@@ -17,10 +17,10 @@ download only gets it when it is free or held by something idle.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Protocol
 
+from .meter import Notifier
 from .upstream import UpstreamError
 
 DISPLACED_SECONDS = 30
@@ -55,7 +55,7 @@ class ProviderConnection:
         # The content the holder streams for
         self._holding_for: str | None = None
         self._foreground_waiting = 0
-        self._changed = asyncio.Event()
+        self._changed = Notifier()
 
     # --- devices ----------------------------------------------------------------
 
@@ -80,7 +80,7 @@ class ProviderConnection:
         self.since = now
         if self._holder is not None and self._holding_for != content:
             self._holder.preempt()
-        self._notify()
+        self._changed.notify()
         return True
 
     def is_current(self, content: str) -> bool:
@@ -117,26 +117,19 @@ class ProviderConnection:
                     return
                 if self._holder is not None and (foreground or self._holder.is_idle()):
                     self._holder.preempt()
-                await self._wait()
+                await self._changed.wait()
         finally:
             if foreground:
                 self._foreground_waiting -= 1
                 # Background work may have been waiting for us to go.
-                self._notify()
+                self._changed.notify()
 
     async def release(self, holder: Holder) -> None:
         if self._holder is holder:
             self._holder = None
             self._holding_for = None
-        self._notify()
+        self._changed.notify()
 
     async def poke(self) -> None:
         """Wake background waiters, e.g. after a holder became idle."""
-        self._notify()
-
-    async def _wait(self) -> None:
-        await self._changed.wait()
-
-    def _notify(self) -> None:
-        self._changed.set()
-        self._changed = asyncio.Event()
+        self._changed.notify()

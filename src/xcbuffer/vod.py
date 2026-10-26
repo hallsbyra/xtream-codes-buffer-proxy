@@ -220,7 +220,7 @@ class VodFile:
             return False
         if self._blocked() or self._want_foreground:
             return True
-        if not self.current or self.capped or self.cache.disk_low():
+        if self.capped or self.cache.disk_low():
             return False
         return self._window_open()
 
@@ -384,8 +384,6 @@ class VodFile:
                 self.write_pos = None
                 try:
                     self._save_meta()
-                except OSError as exc:
-                    log.warning("%s: could not save metadata (%s)", self.label, exc)
                 finally:
                     await connection.release(self)
             if stuck:
