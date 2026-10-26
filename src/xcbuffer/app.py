@@ -20,9 +20,8 @@ from aiohttp import web
 
 from . import xtream
 from .config import Settings
-from .gate import ViewerGate
+from .connection import ProviderConnection
 from .live import LiveManager
-from .slot import UpstreamSlot
 from .tunables import Tunables
 from .upstream import API_TIMEOUT, CHUNK, Upstream, UpstreamError, forward_headers
 from .vod import NotCacheable, VodCache
@@ -32,7 +31,7 @@ log = logging.getLogger(__name__)
 
 SETTINGS = web.AppKey("settings", Settings)
 UPSTREAM = web.AppKey("upstream", Upstream)
-SLOT = web.AppKey("slot", UpstreamSlot)
+CONNECTION = web.AppKey("connection", ProviderConnection)
 VOD = web.AppKey("vod", VodCache)
 LIVE = web.AppKey("live", LiveManager)
 CATALOG = web.AppKey("catalog", xtream.Catalog)
@@ -41,7 +40,6 @@ RELAY_HOSTS = web.AppKey("relay_hosts", set)
 HLS = web.AppKey("hls", dict)
 HLS_ACTIVE_SECONDS = 30
 VPN = web.AppKey("vpn", VpnMonitor)
-GATE = web.AppKey("gate", ViewerGate)
 TUNABLES = web.AppKey("tunables", Tunables)
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico")
@@ -50,19 +48,19 @@ DISCONNECTS = (ConnectionResetError, aiohttp.ClientConnectionResetError, BrokenP
 
 
 class Passthrough:
-    """Slot holder for streams relayed without buffering (HLS, catch-up).
+    """Connection holder for streams relayed without buffering (HLS, catch-up).
 
-    Relays share one slot, so they open one provider connection at a time: a
-    new one waits briefly for the previous to finish (an HLS segment) and
+    Relays share one holder, so they open one provider connection at a time:
+    a new one waits briefly for the previous to finish (an HLS segment) and
     otherwise closes it (a stream). HLS fetches many short requests, so the
-    slot is kept for a while after the last one ends instead of being handed
-    to a background download."""
+    connection is kept for a while after the last one ends instead of being
+    handed to a background download."""
 
     label = "relay"
     HANDOVER_SECONDS = 2
 
-    def __init__(self, slot: UpstreamSlot, linger: float) -> None:
-        self.slot = slot
+    def __init__(self, connection: ProviderConnection, linger: float) -> None:
+        self.connection = connection
         self.linger = linger
         self.active: set[aiohttp.ClientResponse] = set()
         self._release: asyncio.TimerHandle | None = None
@@ -84,12 +82,16 @@ class Passthrough:
             resp.close()
         self._schedule_release(0)
 
-    async def open(self, connect: Callable[[], Awaitable[aiohttp.ClientResponse]]) -> aiohttp.ClientResponse:
+    async def open(
+        self, content: str, connect: Callable[[], Awaitable[aiohttp.ClientResponse]]
+    ) -> aiohttp.ClientResponse:
         async with self._opening:
+            # A release scheduled while we waited must still happen if the
+            # content was switched away from meanwhile.
+            await self.connection.acquire(self, content, foreground=True)
             if self._release:
                 self._release.cancel()
                 self._release = None
-            await self.slot.acquire(self, foreground=True)
             self._preempted = False
             if self.active:
                 try:
@@ -98,7 +100,7 @@ class Passthrough:
                     for resp in list(self.active):
                         resp.close()
                     self.active.clear()
-            if self._preempted or self.slot.holder is not self:
+            if self._preempted or self.connection.holder is not self:
                 raise UpstreamError(503, "another request took the provider connection")
             self._pending = asyncio.ensure_future(connect())
             try:
@@ -135,7 +137,7 @@ class Passthrough:
         if self._pending:
             # Let the cancelled connection close before someone else opens one.
             await asyncio.wait([self._pending])
-        await self.slot.release(self)
+        await self.connection.release(self)
 
 
 RELAY = web.AppKey("relay", Passthrough)
@@ -194,10 +196,10 @@ def peer_of(request: web.Request) -> str:
 
 def _busy(request: web.Request, content: str) -> web.Response | None:
     """Refuse a device that just lost the connection to another one."""
-    gate = request.app[GATE]
-    if gate.admit(peer_of(request), content):
+    connection = request.app[CONNECTION]
+    if connection.admit(peer_of(request), content):
         return None
-    return web.Response(status=503, text=f"Busy: {gate.owner} is watching {gate.content}.")
+    return web.Response(status=503, text=f"Busy: {connection.owner} is watching {connection.content}.")
 
 
 def _unavailable(request: web.Request) -> web.Response | None:
@@ -426,7 +428,7 @@ async def relay(request: web.Request, url: str | None = None, content: str = "re
 
     try:
         try:
-            up = await (passthrough.open(connect) if holds_slot else connect())
+            up = await (passthrough.open(content, connect) if holds_slot else connect())
         except UpstreamError as exc:
             return web.Response(status=exc.status, text=str(exc))
         except (aiohttp.ClientError, TimeoutError) as exc:
@@ -482,7 +484,7 @@ async def status(request: web.Request) -> web.Response:
     settings = app[SETTINGS]
     catalog = app[CATALOG]
     cache = app[VOD]
-    holder = app[SLOT].holder
+    holder = app[CONNECTION].holder
     now = time.time()
 
     live_items = []
@@ -562,7 +564,7 @@ async def status(request: web.Request) -> web.Response:
         "via_proxy": bool(settings.upstream_proxy),
         "vpn": app[VPN].snapshot() if VPN in app else None,
         "slot": holder.label if holder else None,
-        "viewer": app[GATE].snapshot(),
+        "viewer": app[CONNECTION].snapshot(),
         "hls": [
             {"peer": peer, "id": sid, "name": catalog.get("live", sid).name, "last_ago": now - last}
             for peer, (sid, last) in app[HLS].items()
@@ -626,14 +628,7 @@ def create_app(settings: Settings) -> web.Application:
     app[SETTINGS] = settings
     app[CATALOG] = xtream.Catalog()
     app[RELAY_HOSTS] = set()
-    app[GATE] = ViewerGate()
-
-    def drop_previous(content: str) -> None:
-        holder = app[SLOT].holder if SLOT in app else None
-        if holder is not None and holder.label != content:
-            holder.preempt()
-
-    app[GATE].on_switch = drop_previous
+    app[CONNECTION] = ProviderConnection()
     app[HLS] = {}
 
     async def lifecycle(app: web.Application):
@@ -643,16 +638,15 @@ def create_app(settings: Settings) -> web.Application:
             await app[VPN].refresh()
             tasks.append(asyncio.create_task(app[VPN].run()))
         app[UPSTREAM] = Upstream(settings, app.get(VPN))
-        app[SLOT] = UpstreamSlot()
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         app[CATALOG].path = settings.data_dir / "catalog.json"
         app[CATALOG].load()
         app[TUNABLES] = Tunables(settings.data_dir / "settings.json", settings.buffer_minutes)
-        app[VOD] = VodCache(settings, app[UPSTREAM], app[SLOT], app[TUNABLES], app[GATE].is_current)
-        app[LIVE] = LiveManager(settings, app[UPSTREAM], app[SLOT], app[TUNABLES])
-        app[RELAY] = Passthrough(app[SLOT], settings.passthrough_linger_seconds)
+        app[VOD] = VodCache(settings, app[UPSTREAM], app[CONNECTION], app[TUNABLES])
+        app[LIVE] = LiveManager(settings, app[UPSTREAM], app[CONNECTION], app[TUNABLES])
+        app[RELAY] = Passthrough(app[CONNECTION], settings.passthrough_linger_seconds)
         if VPN in app:
-            app[VPN].on_down = lambda: app[SLOT].holder and app[SLOT].holder.preempt()
+            app[VPN].on_down = lambda: app[CONNECTION].holder and app[CONNECTION].holder.preempt()
         tasks += [
             asyncio.create_task(app[VOD].run_housekeeping()),
             asyncio.create_task(app[LIVE].run_housekeeping()),

@@ -5,7 +5,7 @@ import os
 from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
-from xcbuffer.app import GATE, VOD, VPN
+from xcbuffer.app import CONNECTION, VOD, VPN
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -342,7 +342,7 @@ async def test_latest_device_wins_without_tug_of_war(provider, settings, make_pr
     assert await shared.read() == MOVIE[:10]
 
     # After a short while the first TV can take over again.
-    client.app[GATE]._displaced["livingroom"] = 0
+    client.app[CONNECTION]._displaced["livingroom"] = 0
     again = await client.get(LIVE_URL, headers={"X-Peer": "livingroom"})
     assert again.status == 200
     assert (await status(client))["viewer"]["owner"] == "livingroom"

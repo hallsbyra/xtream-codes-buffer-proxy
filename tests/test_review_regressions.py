@@ -10,7 +10,7 @@ from aiohttp import web
 from conftest import MOVIE, status, ts_packets, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
-from xcbuffer.app import CATALOG, RELAY, SLOT, VOD
+from xcbuffer.app import CATALOG, CONNECTION, RELAY, VOD
 from xcbuffer.upstream import UpstreamError
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
@@ -83,7 +83,7 @@ async def test_slot_released_when_vod_metadata_write_fails(provider, settings, m
         # Before the fix the failed task kept the slot and this hung forever.
         live = await asyncio.wait_for(client.get(LIVE_URL), 5)
         await asyncio.wait_for(live.content.readexactly(188), 5)
-        assert client.app[SLOT].holder.label == "live 5"
+        assert client.app[CONNECTION].holder.label == "live 5"
     live.close()
     movie.close()
 
@@ -264,3 +264,25 @@ async def test_failed_hole_punch_preserves_accounting(provider, settings, make_p
     vf.trim_played()
     actual_bytes = vf.path.stat().st_blocks * 512
     assert vf.downloaded == before, f"accounted {vf.downloaded} bytes but {actual_bytes} still allocated"
+
+
+# --- connection ownership ---
+
+
+async def test_relay_queued_before_switch_does_not_take_the_connection(provider, settings, make_proxy):
+    provider.movie_delay = .02
+    client = await make_proxy(settings)
+    a = await client.get("/live/user/pass/5.raw")
+    await a.content.readexactly(188)
+    # b waits for a to finish; c waits behind b. Both were admitted before the switch.
+    b = asyncio.create_task(client.get("/live/user/pass/6.raw"))
+    c = asyncio.create_task(client.get("/live/user/pass/7.raw"))
+    await asyncio.sleep(.1)
+    movie = await asyncio.wait_for(client.get(MOVIE_URL), 15)
+    body = await asyncio.wait_for(movie.read(), 15)
+    responses = [a, movie] + [await asyncio.wait_for(t, 3) for t in (b, c)]
+    for response in responses:
+        response.close()
+    stale = [p for p in provider.stream_requests if "/7.raw" in p]
+    assert not stale, "a relay queued before the switch connected after it"
+    assert body == MOVIE

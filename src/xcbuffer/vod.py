@@ -21,16 +21,15 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
 
 from .config import Settings
+from .connection import ProviderConnection, Revoked
 from .meter import Notifier, RateMeter
 from .rangeset import RangeSet
-from .slot import UpstreamSlot
 from .tunables import Tunables
 from .upstream import CHUNK, Upstream, UpstreamError, VpnDown
 
@@ -134,7 +133,7 @@ class VodFile:
         self._ready_waiters = 0
         self._deleted = False
 
-    # --- slot holder protocol -------------------------------------------
+    # --- connection holder protocol -------------------------------------
 
     @property
     def label(self) -> str:
@@ -187,7 +186,7 @@ class VodFile:
 
     @property
     def current(self) -> bool:
-        return self.cache.is_current(self.label)
+        return self.cache.connection.is_current(self.label)
 
     def _blocked(self) -> bool:
         return any(r.waiting for r in self.readers)
@@ -235,7 +234,7 @@ class VodFile:
         self._headers = headers
         self.error = None
         self.last_read = time.time()
-        if not self.complete and self.cache.slot.holder is not self:
+        if not self.complete and self.cache.connection.holder is not self:
             self._want_foreground = True
         self._kick()
 
@@ -333,7 +332,7 @@ class VodFile:
         return self.ranges.first_missing(self.play_pos, self.size)
 
     async def _run(self) -> None:
-        slot = self.cache.slot
+        connection = self.cache.connection
         while True:
             if not self._wants_data():
                 self.state = self._idle_state()
@@ -349,7 +348,12 @@ class VodFile:
                         return
                 continue
             self.state = "starting"
-            await slot.acquire(self, foreground=self._want_foreground)
+            try:
+                await connection.acquire(self, self.label, foreground=self._want_foreground)
+            except Revoked:
+                # Another title is being watched now; _wants_data says so too.
+                self._want_foreground = False
+                continue
             self._want_foreground = False
             self._preempted = False
             try:
@@ -361,7 +365,7 @@ class VodFile:
                 except OSError as exc:
                     log.warning("%s: could not save metadata (%s)", self.label, exc)
                 finally:
-                    await slot.release(self)
+                    await connection.release(self)
 
     async def _download_while_wanted(self) -> None:
         failures = 0
@@ -550,15 +554,13 @@ class VodCache:
         self,
         settings: Settings,
         upstream: Upstream,
-        slot: UpstreamSlot,
+        connection: ProviderConnection,
         tunables: Tunables,
-        is_current: Callable[[str], bool],
     ) -> None:
         self.settings = settings
         self.upstream = upstream
-        self.slot = slot
+        self.connection = connection
         self.tunables = tunables
-        self.is_current = is_current
         self.dir = settings.data_dir / "vod"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.files: dict[str, VodFile] = {}

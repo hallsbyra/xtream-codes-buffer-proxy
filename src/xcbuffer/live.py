@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 import aiohttp
 
 from .config import Settings
+from .connection import ProviderConnection, Revoked
 from .meter import Notifier, RateMeter
-from .slot import UpstreamSlot
 from .tunables import Tunables
 from .upstream import CHUNK, Upstream, UpstreamError, VpnDown
 
@@ -118,7 +118,7 @@ class LiveChannel:
         self._headers: dict[str, str] = {}
         self._task: asyncio.Task | None = None
 
-    # --- slot holder protocol -------------------------------------------------
+    # --- connection holder protocol -------------------------------------------
 
     @property
     def label(self) -> str:
@@ -150,9 +150,13 @@ class LiveChannel:
             self.stop()
 
     async def _run(self) -> None:
-        slot = self.manager.slot
+        connection = self.manager.connection
         try:
-            await slot.acquire(self, foreground=True)
+            try:
+                await connection.acquire(self, self.label, foreground=True)
+            except Revoked as exc:
+                self.error = exc
+                return
             log.info("%s: connecting to provider", self.label)
             try:
                 failures = 0
@@ -178,7 +182,7 @@ class LiveChannel:
                     self.clock.reset()
                     await asyncio.sleep(min(2**failures, 10) if failures else 1)
             finally:
-                await slot.release(self)
+                await connection.release(self)
         finally:
             log.info("%s: stopped after %.0f s", self.label, time.time() - self.started_at)
             self.stopped = True
@@ -320,10 +324,12 @@ class LiveChannel:
 
 
 class LiveManager:
-    def __init__(self, settings: Settings, upstream: Upstream, slot: UpstreamSlot, tunables: Tunables) -> None:
+    def __init__(
+        self, settings: Settings, upstream: Upstream, connection: ProviderConnection, tunables: Tunables
+    ) -> None:
         self.settings = settings
         self.upstream = upstream
-        self.slot = slot
+        self.connection = connection
         self.tunables = tunables
         self.dir = settings.data_dir / "live"
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -378,7 +384,7 @@ class LiveManager:
         while True:
             await asyncio.sleep(5)
             self.housekeeping()
-            await self.slot.poke()
+            await self.connection.poke()
 
     def shutdown(self) -> None:
         for channel in list(self.channels.values()):

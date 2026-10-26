@@ -1,7 +1,10 @@
+import asyncio
+
 import pytest
 
 from conftest import ts_packets
 from xcbuffer.app import parse_range
+from xcbuffer.connection import ProviderConnection, Revoked
 from xcbuffer.live import TsClock
 from xcbuffer.rangeset import RangeSet
 from xcbuffer.vod import plausible_seconds
@@ -85,3 +88,43 @@ def test_catalog_reads_minute_fields():
     catalog = Catalog()
     catalog.harvest("get_vod_info", {"info": {"episode_run_time": "101"}, "movie_data": {"stream_id": 8}})
     assert catalog.get("movie", "8").duration == 6060
+
+
+class Holder:
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.preempted = False
+
+    def preempt(self) -> None:
+        self.preempted = True
+
+    def is_idle(self) -> bool:
+        return False
+
+
+async def test_switch_revokes_work_waiting_for_the_connection():
+    connection = ProviderConnection()
+    connection.admit("tv", "movie 1")
+    slow = Holder("movie 1")
+    await connection.acquire(slow, "movie 1", foreground=True)
+    connection.admit("tv", "live 5")
+    live = Holder("live 5")
+    waiting = asyncio.create_task(connection.acquire(live, "live 5", foreground=True))
+    await asyncio.sleep(0)
+    connection.admit("tv", "movie 2")
+    with pytest.raises(Revoked):
+        await asyncio.wait_for(waiting, 1)
+    assert slow.preempted and not live.preempted
+    await connection.release(slow)
+    assert connection.holder is None
+
+
+async def test_switch_preempts_holder_of_other_content_only():
+    connection = ProviderConnection()
+    connection.admit("tv-a", "live 5")
+    relay = Holder("relay")
+    await connection.acquire(relay, "live 5", foreground=True)
+    connection.admit("tv-b", "live 5")
+    assert not relay.preempted
+    connection.admit("tv-b", "movie 1")
+    assert relay.preempted
