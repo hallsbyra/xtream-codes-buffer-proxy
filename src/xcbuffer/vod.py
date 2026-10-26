@@ -13,6 +13,7 @@ when a reader seeks outside what is being fetched, the downloader moves there.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
 import ctypes.util
 import json
@@ -330,6 +331,12 @@ class VodFile:
             target = self.ranges.first_missing(jump, self.size)
             if target is not None:
                 return target
+        # A reader waiting for bytes comes before filling the window. A probe
+        # of the file's end may have moved play_pos past what it waits for.
+        for reader in sorted((r for r in self.readers if r.waiting), key=lambda r: r.pos):
+            target = self.ranges.first_missing(reader.pos, self.size)
+            if target is not None:
+                return target
         return self.ranges.first_missing(self.play_pos, self.size)
 
     async def _run(self) -> None:
@@ -358,7 +365,7 @@ class VodFile:
             self._want_foreground = False
             self._preempted = False
             try:
-                await self._download_while_wanted()
+                stuck = await self._download_while_wanted()
             finally:
                 self.write_pos = None
                 try:
@@ -367,13 +374,20 @@ class VodFile:
                     log.warning("%s: could not save metadata (%s)", self.label, exc)
                 finally:
                     await connection.release(self)
+            if stuck:
+                # Taking and releasing a free connection never yields, so
+                # looping straight back would freeze the whole proxy.
+                self._wake.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), 5)
 
-    async def _download_while_wanted(self) -> None:
+    async def _download_while_wanted(self) -> bool:
+        """Download while data is wanted; True when nothing could be fetched."""
         failures = 0
         while self._wants_data() and not self._preempted:
             target = self._next_target()
             if target is None:
-                return
+                return True
             self._fetch_task = asyncio.create_task(self._fetch(target))
             try:
                 await self._fetch_task
@@ -393,11 +407,12 @@ class VodFile:
                     self.error = exc if isinstance(exc, UpstreamError) else UpstreamError(502, self.last_error)
                     self._ready.set()
                     self._changed.notify()
-                    return
+                    return False
                 self.state = "retrying"
                 await asyncio.sleep(min(2**failures, 20))
             finally:
                 self._fetch_task = None
+        return False
 
     async def _fetch(self, start: int) -> None:
         assert self._upstream_path is not None

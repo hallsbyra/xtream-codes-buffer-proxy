@@ -362,3 +362,35 @@ async def test_unrecorded_bytes_are_freed_at_startup(provider, settings, make_pr
     assert allocated < 2 * 1024 * 1024, f"{allocated} bytes allocated but 1 MiB accounted"
     head = await client.get(MOVIE_URL, headers={"Range": "bytes=0-999"})
     assert await head.read() == MOVIE[:1000]
+
+
+# --- fourth review ---
+
+
+async def test_tail_probe_keeps_downloading_for_waiting_reader(provider, settings, make_proxy, monkeypatch):
+    provider.movie_delay = .03
+    client = await make_proxy(settings)
+    first = await client.get(MOVIE_URL)
+    await first.content.readexactly(1024)
+    consuming = asyncio.create_task(first.content.read())
+    vf = client.app[VOD].files["movie_1"]
+    next_target = vf._next_target
+    stuck = asyncio.Event()
+
+    def guarded_next_target():
+        target = next_target()
+        if target is None and vf._wants_data():
+            # Ends the busy loop the old code fell into, which froze the event
+            # loop and with it every request and the test's own timeouts.
+            stuck.set()
+            vf.error = UpstreamError(502, "downloader found nothing to fetch")
+        return target
+
+    monkeypatch.setattr(vf, "_next_target", guarded_next_target)
+    # MP4 players read the index at the end while the start is still loading.
+    tail = await client.get(MOVIE_URL, headers={"Range": f"bytes={len(MOVIE) - 10}-"})
+    assert await tail.read() == MOVIE[-10:]
+    body = await asyncio.wait_for(consuming, 10)
+    first.close()
+    assert not stuck.is_set(), "a reader was waiting but the downloader found nothing to fetch"
+    assert body == MOVIE[1024:]
