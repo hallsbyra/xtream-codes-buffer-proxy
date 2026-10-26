@@ -464,3 +464,46 @@ async def test_tail_probe_does_not_count_as_playback(provider, settings, make_pr
     vf.trim_played()
     unwatched = vf.ranges.covered_from(half)
     assert unwatched == len(MOVIE) - half, f"only {unwatched} unwatched bytes left after a tail probe"
+
+
+# --- fifth review ---
+
+
+async def test_seek_without_range_support_does_not_restart_in_a_loop(provider, settings, make_proxy, aiohttp_server):
+    requests = 0
+
+    async def no_ranges(request):
+        nonlocal requests
+        requests += 1
+        resp = web.StreamResponse(headers={"Content-Length": str(len(MOVIE)), "Content-Type": "video/mp4"})
+        await resp.prepare(request)
+        for pos in range(0, len(MOVIE), 256 * 1024):
+            await resp.write(MOVIE[pos:pos + 256 * 1024])
+            await asyncio.sleep(.01)
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/movie/{user}/{password}/{name}", no_ranges)
+    app.router.add_get("/player_api.php", provider.player_api)
+    server = await aiohttp_server(app)
+    client = await make_proxy(settings, upstream_url=str(server.make_url("")).rstrip("/"))
+    first = await client.get(MOVIE_URL)
+    await first.content.readexactly(1024)
+    # This seek finds out that the provider ignores Range.
+    early = 12 * 1024 * 1024
+    probe = await client.get(MOVIE_URL, headers={"Range": f"bytes={early}-{early + 1023}"})
+    assert await asyncio.wait_for(probe.read(), 10) == MOVIE[early:early + 1024]
+    # This one lands ahead of the download, which can only go on from the start.
+    start = len(MOVIE) - 2 * 1024 * 1024
+    late = await client.get(MOVIE_URL, headers={"Range": f"bytes={start}-"})
+    body = await asyncio.wait_for(late.read(), 10)
+    first.close()
+    assert requests <= 3, f"{requests} provider requests for two seeks"
+    assert body == MOVIE[start:]
+
+
+async def test_contiguous_read_to_the_end_counts_as_playback(provider, settings, make_proxy):
+    client = await make_proxy(settings)
+    assert await (await client.get(MOVIE_URL)).read() == MOVIE
+    vf = client.app[VOD].files["movie_1"]
+    assert vf.play_pos == len(MOVIE), "the last part of the movie was not counted as played"

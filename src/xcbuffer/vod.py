@@ -74,6 +74,9 @@ class Reader:
     pos: int
     started: float = field(default_factory=time.time)
     waiting: bool = False
+    # Set while the reader looks like a player reading the container index
+    # at the end of the file: playback starts counting once it reaches this.
+    probe_until: int | None = None
 
 
 _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
@@ -190,10 +193,10 @@ class VodFile:
     def current(self) -> bool:
         return self.cache.connection.is_current(self.label)
 
-    def _is_playback(self, pos: int) -> bool:
-        """Reads near the end are players probing the container index kept
-        there, not playback; they must not move play_pos."""
-        return self.size is None or pos < self.size - KEEP_EDGE_BYTES
+    def _looks_like_probe(self, pos: int) -> bool:
+        """A read opened near the end of the file, far ahead of playback, is
+        a player reading the container index kept there."""
+        return self.size is not None and pos >= self.size - KEEP_EDGE_BYTES and pos > self.play_pos + JUMP_SLACK
 
     def _blocked(self) -> bool:
         return any(r.waiting for r in self.readers)
@@ -267,7 +270,9 @@ class VodFile:
     def open_reader(self, peer: str, pos: int) -> Reader:
         reader = Reader(peer, pos)
         self.readers.add(reader)
-        if self._is_playback(pos):
+        if self._looks_like_probe(pos):
+            reader.probe_until = pos + JUMP_SLACK
+        else:
             self.play_pos = pos
         return reader
 
@@ -307,7 +312,10 @@ class VodFile:
         self.last_read = time.time()
         data = os.pread(self._open(), n, reader.pos)
         reader.pos += len(data)
-        if self._is_playback(reader.pos):
+        if reader.probe_until is not None and reader.pos >= reader.probe_until:
+            # It read on like playback does, e.g. after a seek to the credits.
+            reader.probe_until = None
+        if reader.probe_until is None:
             self.play_pos = reader.pos
         if not self.downloading and self._wants_data():
             self._kick()
@@ -323,6 +331,10 @@ class VodFile:
         self._wake.set()
 
     def _seek_download(self, pos: int) -> None:
+        if not self.supports_range:
+            # The download can only go on from the start; wait for it.
+            self._kick()
+            return
         if self.write_pos is not None and self.write_pos <= pos <= self.write_pos + JUMP_SLACK:
             return
         self._jump_to = pos
@@ -332,6 +344,7 @@ class VodFile:
 
     def _next_target(self) -> int | None:
         if self.size is None or not self.supports_range:
+            self._jump_to = None
             return 0
         if self._jump_to is not None:
             jump, self._jump_to = self._jump_to, None
@@ -481,7 +494,7 @@ class VodFile:
         first and last bytes where containers keep headers and indexes."""
         if self.size is None or not self.supports_range or self._deleted:
             return
-        positions = [r.pos for r in self.readers if self._is_playback(r.pos)] or [self.play_pos]
+        positions = [r.pos for r in self.readers if r.probe_until is None] or [self.play_pos]
         keep_from = min(positions) - int(KEEP_BEHIND_SECONDS * self.byte_rate)
         end = min(keep_from, self.size - KEEP_EDGE_BYTES)
         if end <= KEEP_EDGE_BYTES:
