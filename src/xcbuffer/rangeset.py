@@ -29,6 +29,17 @@ class RangeSet:
         """The covered parts of [start, end)."""
         return [(max(a, start), min(b, end)) for a, b in self._ranges if a < end and b > start]
 
+    def missing(self, start: int, end: int) -> list[tuple[int, int]]:
+        """The uncovered parts of [start, end)."""
+        gaps = []
+        for a, b in self.within(start, end):
+            if a > start:
+                gaps.append((start, a))
+            start = b
+        if start < end:
+            gaps.append((start, end))
+        return gaps
+
     def remove(self, start: int, end: int) -> list[tuple[int, int]]:
         """Remove [start, end) and return the byte ranges that were covered."""
         removed = []

@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -344,3 +345,20 @@ async def test_hole_punch_without_saved_metadata_cannot_resurrect_ranges(
     on_disk = vf.path.read_bytes()
     for start, end in restarted.ranges.to_list():
         assert on_disk[start:end] == MOVIE[start:end], f"bytes {start}-{end} claimed but freed"
+
+
+async def test_unrecorded_bytes_are_freed_at_startup(provider, settings, make_proxy):
+    vod_dir = settings.data_dir / "vod"
+    vod_dir.mkdir(parents=True)
+    # Written in full, but a crash left metadata that knows only the first MiB.
+    (vod_dir / "movie_1.mp4").write_bytes(MOVIE)
+    (vod_dir / "movie_1.json").write_text(json.dumps({
+        "kind": "movie", "stream_id": "1", "ext": "mp4", "size": len(MOVIE),
+        "content_type": "video/mp4", "ranges": [[0, 1024 * 1024]],
+    }))
+    client = await make_proxy(settings)
+    vf = client.app[VOD].files["movie_1"]
+    allocated = vf.path.stat().st_blocks * 512
+    assert allocated < 2 * 1024 * 1024, f"{allocated} bytes allocated but 1 MiB accounted"
+    head = await client.get(MOVIE_URL, headers={"Range": "bytes=0-999"})
+    assert await head.read() == MOVIE[:1000]

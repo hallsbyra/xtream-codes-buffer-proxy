@@ -29,6 +29,13 @@ def test_rangeset_merges_and_finds_gaps():
     assert rs.total() == 100
 
 
+def test_rangeset_lists_missing_parts():
+    rs = RangeSet([[10, 20], [30, 40]])
+    assert rs.missing(0, 50) == [(0, 10), (20, 30), (40, 50)]
+    assert rs.missing(15, 35) == [(20, 30)]
+    assert rs.missing(10, 20) == []
+    assert RangeSet().missing(0, 5) == [(0, 5)]
+
 def test_parse_range():
     assert parse_range(None, 100) is None
     assert parse_range("bytes=0-", 100) == (0, 99)

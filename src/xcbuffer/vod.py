@@ -486,6 +486,22 @@ class VodFile:
                 self._save_meta()
                 return
 
+    def free_unrecorded(self) -> None:
+        """Give back disk blocks the metadata does not account for, such as
+        bytes written after the last save before a crash."""
+        assert self.size is not None
+        try:
+            fd = os.open(self.path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            for start, stop in self.ranges.missing(0, self.size):
+                punch_hole(fd, start, stop - start)
+        except OSError as exc:
+            log.warning("%s: could not free unrecorded data (%s)", self.label, exc)
+        finally:
+            os.close(fd)
+
     def _init_file(self, size: int, content_type: str | None) -> None:
         self.size = size
         if content_type and "html" not in content_type and "json" not in content_type:
@@ -578,6 +594,7 @@ class VodCache:
         for meta_path in self.dir.glob("*.json"):
             vf = VodFile.load(self, meta_path)
             if vf:
+                vf.free_unrecorded()
                 self.files[vf.key] = vf
             else:
                 meta_path.unlink(missing_ok=True)
