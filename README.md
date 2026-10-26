@@ -25,8 +25,9 @@ single connection at a time.
   page can jump a viewer back to live.
 - **One provider connection at a time.** The device that asked last wins.
   Another device asking for the same title or channel shares the stream
-  instead. A device that just lost the connection cannot take it back for
-  30 seconds, so players that reconnect on their own do not start a tug of war.
+  instead, as long as both use the same stream format (HLS or MPEG-TS). A
+  device that just lost the connection cannot take it back for 30 seconds,
+  so players that reconnect on their own do not start a tug of war.
 - **Only the latest title downloads.** Switching title or channel stops the
   previous download; its data is kept for a while in case you go back.
 - **Credentials are never stored.** Username and password pass through from

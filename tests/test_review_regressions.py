@@ -12,7 +12,7 @@ from aiohttp import web
 from conftest import MOVIE, status, ts_packets, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
-from xcbuffer.app import CATALOG, CONNECTION, RELAY, VOD
+from xcbuffer.app import CATALOG, CONNECTION, LIVE, RELAY, VOD
 from xcbuffer.upstream import UpstreamError
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
@@ -288,6 +288,23 @@ async def test_relay_queued_before_switch_does_not_take_the_connection(provider,
     stale = [p for p in provider.stream_requests if "/7.raw" in p]
     assert not stale, "a relay queued before the switch connected after it"
     assert body == MOVIE
+
+
+async def test_ts_viewer_takes_channel_from_hls_viewer(provider, settings, make_proxy, monkeypatch):
+    monkeypatch.setattr(app_module, "peer_of", lambda req: req.headers.get("X-Peer", "tv-a"))
+    client = await make_proxy(settings)
+    hls = {"X-Peer": "tv-a"}
+    playlist = await (await client.get("/live/user/pass/5.m3u8", headers=hls)).text()
+    segment = next(line for line in playlist.splitlines() if line.startswith("/_relay/"))
+    assert (await client.get(segment, headers=hls)).status == 200
+    ts = await client.get(LIVE_URL, headers={"X-Peer": "tv-b"})
+    await ts.content.readexactly(188)
+    # The HLS player keeps fetching segments; the newer TS viewer must keep the channel.
+    next_segment = await client.get(segment, headers=hls)
+    still_streaming = not client.app[LIVE].channels["5"].stopped
+    ts.close()
+    assert next_segment.status == 503
+    assert still_streaming
 
 
 # --- cache accounting ---

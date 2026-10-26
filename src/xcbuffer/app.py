@@ -334,6 +334,12 @@ def _learn_duration(request: web.Request, vf) -> None:
 # --- live ---------------------------------------------------------------------------------
 
 
+def _hls_content(stream_id: str) -> str:
+    """HLS and MPEG-TS of one channel each need their own provider
+    connection, so they are different content: the last asked for wins."""
+    return f"live {stream_id} hls"
+
+
 async def live(request: web.Request) -> web.StreamResponse:
     if blocked := _unavailable(request):
         return blocked
@@ -341,7 +347,7 @@ async def live(request: web.Request) -> web.StreamResponse:
     if stream_id.isdigit() and ext == "m3u8":
         # HLS is relayed unbuffered; remember the channel for the status page.
         request.app[HLS][peer_of(request)] = (stream_id, time.time())
-        return await relay(request, content=f"live {stream_id}")
+        return await relay(request, content=_hls_content(stream_id))
     if not stream_id.isdigit() or ext not in ("", "ts"):
         return await relay(request)
     if busy := _busy(request, f"live {stream_id}"):
@@ -466,7 +472,7 @@ async def relay_token(request: web.Request) -> web.StreamResponse:
     hls = request.app[HLS].get(peer_of(request))
     if hls:
         request.app[HLS][peer_of(request)] = (hls[0], time.time())
-        return await relay(request, url, content=f"live {hls[0]}")
+        return await relay(request, url, content=_hls_content(hls[0]))
     return await relay(request, url)
 
 

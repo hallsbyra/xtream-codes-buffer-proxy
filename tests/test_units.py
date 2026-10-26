@@ -121,10 +121,10 @@ async def test_switch_revokes_work_waiting_for_the_connection():
 
 async def test_switch_preempts_holder_of_other_content_only():
     connection = ProviderConnection()
-    connection.admit("tv-a", "live 5")
+    connection.admit("tv-a", "live 5 hls")
     relay = Holder("relay")
-    await connection.acquire(relay, "live 5", foreground=True)
-    connection.admit("tv-b", "live 5")
+    await connection.acquire(relay, "live 5 hls", foreground=True)
+    connection.admit("tv-b", "live 5 hls")
     assert not relay.preempted
     connection.admit("tv-b", "movie 1")
     assert relay.preempted

@@ -368,7 +368,7 @@ async def test_hls_live_shows_on_status_page(provider, settings, make_proxy):
     await client.get("/player_api.php?username=u&password=p&action=get_live_streams")
     await (await client.get("/live/user/pass/5.m3u8")).text()
     s = await status(client)
-    assert s["viewer"]["content"] == "live 5"
+    assert s["viewer"]["content"] == "live 5 hls"
     assert s["hls"][0]["name"] == "Kanal 5"
 
 
