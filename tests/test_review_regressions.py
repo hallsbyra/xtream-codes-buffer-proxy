@@ -374,26 +374,26 @@ async def test_tail_probe_keeps_downloading_for_waiting_reader(provider, setting
     first = await client.get(MOVIE_URL)
     await first.content.readexactly(1024)
     consuming = asyncio.create_task(first.content.read())
-    vf = client.app[VOD].files["movie_1"]
-    next_target = vf._next_target
-    stuck = asyncio.Event()
+    connection = client.app[CONNECTION]
+    acquire = connection.acquire
+    acquired = 0
 
-    def guarded_next_target():
-        target = next_target()
-        if target is None and vf._wants_data():
-            # Ends the busy loop the old code fell into, which froze the event
-            # loop and with it every request and the test's own timeouts.
-            stuck.set()
-            vf.error = UpstreamError(502, "downloader found nothing to fetch")
-        return target
+    async def counting_acquire(*args, **kwargs):
+        # Taking a free connection never yields; a downloader that loops on it
+        # froze the event loop and with it the test's own timeouts.
+        nonlocal acquired
+        acquired += 1
+        if acquired > 50:
+            raise RuntimeError("the downloader is spinning")
+        return await acquire(*args, **kwargs)
 
-    monkeypatch.setattr(vf, "_next_target", guarded_next_target)
+    monkeypatch.setattr(connection, "acquire", counting_acquire)
     # MP4 players read the index at the end while the start is still loading.
     tail = await client.get(MOVIE_URL, headers={"Range": f"bytes={len(MOVIE) - 10}-"})
     assert await tail.read() == MOVIE[-10:]
     body = await asyncio.wait_for(consuming, 10)
     first.close()
-    assert not stuck.is_set(), "a reader was waiting but the downloader found nothing to fetch"
+    assert acquired <= 50
     assert body == MOVIE[1024:]
 
 

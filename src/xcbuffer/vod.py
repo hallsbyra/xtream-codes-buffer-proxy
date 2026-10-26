@@ -13,7 +13,6 @@ when a reader seeks outside what is being fetched, the downloader moves there.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ctypes
 import ctypes.util
 import json
@@ -123,7 +122,6 @@ class VodFile:
         # Provider path including credentials; kept in memory only.
         self._upstream_path: str | None = None
         self._headers: dict[str, str] = {}
-        self._jump_to: int | None = None
         self._want_foreground = False
         self._preempted = False
         self._full = False
@@ -197,9 +195,6 @@ class VodFile:
         a player reading the container index kept there."""
         return self.size is not None and pos >= self.size - KEEP_EDGE_BYTES and pos > self.play_pos + JUMP_SLACK
 
-    def _blocked(self) -> bool:
-        return any(r.waiting for r in self.readers)
-
     def _window_open(self) -> bool:
         """Below the buffer window; refills only after draining a bit, so a
         full buffer does not reconnect for every chunk the TV reads."""
@@ -209,20 +204,38 @@ class VodFile:
         self._full = self.ahead_bytes >= limit
         return not self._full
 
-    def _wants_data(self) -> bool:
-        if self.error or self.uncacheable or self._deleted or self.stale:
-            return False
-        if not self.current:
-            return False
+    def _next_fetch(self, at: int | None = None) -> int | None:
+        """The one place that decides what to download: the offset to fetch
+        from next, or None to wait. A download that has reached offset at
+        asks with at, and goes on while the answer is at."""
+        if self.error or self.uncacheable or self.stale or self._deleted or not self.current:
+            return None
         if self.size is None:
-            return bool(self.readers) or self._want_foreground or self._ready_waiters > 0
-        if self.complete or self.cache.disk_free() < CRITICAL_FREE_BYTES:
-            return False
-        if self._blocked() or self._want_foreground:
-            return True
-        if self.capped or self.cache.disk_low():
-            return False
-        return self._window_open()
+            # Fetching from the start tells the size.
+            wanted = self.readers or self._want_foreground or self._ready_waiters
+            return 0 if wanted else None
+        if self.cache.disk_free() < CRITICAL_FREE_BYTES:
+            return None
+        if at is not None and (at >= self.size or self.ranges.covered_from(at)):
+            # Ran into bytes we already have; continue at the next gap.
+            at = None
+        # A reader waiting for bytes comes first, the one nearest the start
+        # first. When it is just ahead of the download it waits for it.
+        waits = (self.ranges.first_missing(r.pos, self.size) for r in self.readers if r.waiting)
+        wait = min((w for w in waits if w is not None), default=None)
+        if wait is not None:
+            return at if at is not None and at <= wait <= at + JUMP_SLACK else wait
+        # Keep going for a player reading the index at the end of the file,
+        # which the window does not cover, instead of a request per chunk.
+        if at is not None and any(
+            r.probe_until is not None and r.pos <= at <= r.pos + JUMP_SLACK for r in self.readers
+        ):
+            return at
+        target = self.ranges.first_missing(self.play_pos, self.size)
+        if target is None or self.capped or self.cache.disk_low() or not self._window_open():
+            return None
+        # Fill the window, but not behind where the TV plays.
+        return at if at is not None and at >= self.play_pos else target
 
     def _idle_state(self) -> str:
         if self.complete:
@@ -304,7 +317,7 @@ class VodFile:
             if not requested:
                 requested = True
                 reader.waiting = True
-                self._seek_download(reader.pos)
+                self._replan()
             await self._changed.wait(5)
 
     def read(self, reader: Reader, n: int) -> bytes:
@@ -316,7 +329,7 @@ class VodFile:
             reader.probe_until = None
         if reader.probe_until is None:
             self.play_pos = reader.pos
-        if not self.downloading and self._wants_data():
+        if not self.downloading and self._next_fetch() is not None:
             self._kick()
         return data
 
@@ -329,34 +342,18 @@ class VodFile:
             self._task = asyncio.create_task(self._run(), name=f"vod {self.key}")
         self._wake.set()
 
-    def _seek_download(self, pos: int) -> None:
-        if self.write_pos is not None and self.write_pos <= pos <= self.write_pos + JUMP_SLACK:
-            return
-        self._jump_to = pos
-        if self._fetch_task and self.write_pos is not None:
+    def _replan(self) -> None:
+        """Stop a download the decision no longer wants, e.g. for a reader that
+        now waits elsewhere, without waiting for its next chunk."""
+        pos = self.write_pos
+        if self._fetch_task and pos is not None and self._next_fetch(pos) != pos:
             self._fetch_task.cancel()
         self._kick()
-
-    def _next_target(self) -> int | None:
-        if self.size is None:
-            return 0
-        if self._jump_to is not None:
-            jump, self._jump_to = self._jump_to, None
-            target = self.ranges.first_missing(jump, self.size)
-            if target is not None:
-                return target
-        # A reader waiting for bytes comes before filling the window. A probe
-        # of the file's end may have moved play_pos past what it waits for.
-        for reader in sorted((r for r in self.readers if r.waiting), key=lambda r: r.pos):
-            target = self.ranges.first_missing(reader.pos, self.size)
-            if target is not None:
-                return target
-        return self.ranges.first_missing(self.play_pos, self.size)
 
     async def _run(self) -> None:
         connection = self.cache.connection
         while True:
-            if not self._wants_data():
+            if self._next_fetch() is None:
                 self.state = self._idle_state()
                 if self.size is None:
                     # Nobody will fetch the headers now; let waiting requests go.
@@ -365,7 +362,7 @@ class VodFile:
                 try:
                     await asyncio.wait_for(self._wake.wait(), 60)
                 except TimeoutError:
-                    if not self._wants_data():
+                    if self._next_fetch() is None:
                         self.state = self._idle_state()
                         return
                 continue
@@ -373,33 +370,23 @@ class VodFile:
             try:
                 await connection.acquire(self, self.label, foreground=self._want_foreground)
             except Revoked:
-                # Another title is being watched now; _wants_data says so too.
+                # Another title is being watched now; _next_fetch says so too.
                 self._want_foreground = False
                 continue
             self._want_foreground = False
             self._preempted = False
             try:
-                stuck = await self._download_while_wanted()
+                await self._download_while_wanted()
             finally:
                 self.write_pos = None
                 try:
                     self._save_meta()
                 finally:
                     await connection.release(self)
-            if stuck:
-                # Taking and releasing a free connection never yields, so
-                # looping straight back would freeze the whole proxy.
-                self._wake.clear()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._wake.wait(), 5)
 
-    async def _download_while_wanted(self) -> bool:
-        """Download while data is wanted; True when nothing could be fetched."""
+    async def _download_while_wanted(self) -> None:
         failures = 0
-        while self._wants_data() and not self._preempted:
-            target = self._next_target()
-            if target is None:
-                return True
+        while not self._preempted and (target := self._next_fetch()) is not None:
             self._fetch_task = asyncio.create_task(self._fetch(target))
             try:
                 await self._fetch_task
@@ -419,12 +406,11 @@ class VodFile:
                     self.error = exc if isinstance(exc, UpstreamError) else UpstreamError(502, self.last_error)
                     self._ready.set()
                     self._changed.notify()
-                    return False
+                    return
                 self.state = "retrying"
                 await asyncio.sleep(min(2**failures, 20))
             finally:
                 self._fetch_task = None
-        return False
 
     async def _fetch(self, start: int) -> None:
         assert self._upstream_path is not None
@@ -464,11 +450,10 @@ class VodFile:
                     self.trim_played()
                     self._save_meta()
                     self.cache.enforce_budget(self)
-                if not self._wants_data() or self._jump_to is not None:
+                if self._next_fetch(pos) != pos:
                     return
-                # Ran into bytes we already have; continue at the next gap.
-                if pos < self.size and self.ranges.covered_from(pos):
-                    return
+            if pos == offset:
+                raise UpstreamError(502, "provider sent no data")
 
     def _mark_stale(self, why: str) -> None:
         """Stop serving this copy; the next request starts a fresh one."""

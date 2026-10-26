@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,7 +8,7 @@ from xcbuffer.app import parse_range
 from xcbuffer.connection import ProviderConnection, Revoked
 from xcbuffer.live import TsClock
 from xcbuffer.rangeset import RangeSet
-from xcbuffer.vod import plausible_seconds
+from xcbuffer.vod import Reader, VodFile, plausible_seconds
 from xcbuffer.xtream import Catalog, rewrite_auth
 
 
@@ -135,3 +136,84 @@ async def test_switch_preempts_holder_of_other_content_only():
     assert not relay.preempted
     connection.admit("tv-b", "movie 1")
     assert relay.preempted
+
+
+MB = 1024 * 1024
+
+
+class FakeCache:
+    def __init__(self, tmp_path) -> None:
+        self.dir = tmp_path
+        self.connection = ProviderConnection()
+        self.connection.admit("tv", "movie 1")
+        # 60 s at the 1 MB/s of the file below
+        self.tunables = SimpleNamespace(buffer_seconds=60)
+
+    def disk_free(self) -> int:
+        return 1 << 40
+
+    def disk_low(self) -> bool:
+        return False
+
+
+def movie(tmp_path, *covered) -> VodFile:
+    vf = VodFile(FakeCache(tmp_path), "movie", "1", "mp4")
+    vf.size = 100 * MB
+    vf.duration = 100
+    for start, end in covered:
+        vf.ranges.add(start * MB, end * MB)
+    return vf
+
+
+def waiting(vf: VodFile, pos_mb: int) -> Reader:
+    reader = vf.open_reader("tv", pos_mb * MB)
+    reader.waiting = True
+    return reader
+
+
+async def test_next_fetch_fills_the_window_and_stops_when_full(tmp_path):
+    vf = movie(tmp_path, (0, 10))
+    assert vf._next_fetch() == 10 * MB
+    assert vf._next_fetch(at=20 * MB) == 20 * MB
+    vf.ranges.add(0, 70 * MB)
+    assert vf._next_fetch() is None
+    assert vf._next_fetch(at=70 * MB) is None
+
+
+async def test_next_fetch_serves_a_waiting_reader_first(tmp_path):
+    vf = movie(tmp_path, (0, 10))
+    vf.ranges.add(0, 70 * MB)  # the window is full
+    waiting(vf, 90)
+    assert vf._next_fetch() == 90 * MB
+    # A download just behind the reader goes on; one far away moves.
+    assert vf._next_fetch(at=85 * MB) == 85 * MB
+    assert vf._next_fetch(at=75 * MB) == 90 * MB
+
+
+async def test_next_fetch_waits_when_nothing_can_be_fetched(tmp_path):
+    vf = movie(tmp_path, (0, 100))
+    waiting(vf, 50)
+    assert vf._next_fetch() is None
+    # A tail probe once moved play_pos past a waiting reader; nothing to fetch
+    # from play_pos must not hide the reader's gap.
+    vf = movie(tmp_path, (0, 10), (95, 100))
+    vf.play_pos = 99 * MB
+    waiting(vf, 10)
+    assert vf._next_fetch() == 10 * MB
+
+
+async def test_next_fetch_skips_cached_bytes_and_other_titles(tmp_path):
+    vf = movie(tmp_path, (0, 10), (20, 30))
+    assert vf._next_fetch(at=20 * MB) == 10 * MB
+    waiting(vf, 50)
+    vf.cache.connection.admit("tv", "movie 2")
+    assert vf._next_fetch() is None
+
+
+async def test_next_fetch_keeps_going_for_an_index_probe_only(tmp_path):
+    vf = movie(tmp_path, (0, 70))  # the window is full
+    probe = vf.open_reader("tv", 95 * MB)
+    assert probe.probe_until is not None
+    assert vf._next_fetch(at=96 * MB) == 96 * MB
+    vf.close_reader(probe)
+    assert vf._next_fetch(at=96 * MB) is None
