@@ -114,6 +114,11 @@ Things that have bitten us:
 - **Disk space is freed with `fallocate` hole punching**, which needs a cache
   filesystem that supports it, such as ext4, XFS or Btrfs. Elsewhere played
   data stays on disk until the title is evicted.
+- **Positions and buffer minutes are estimates.** The proxy sees the bytes the
+  player fetches, not the picture on screen. Players buffer ahead on their
+  own, often 15–60 seconds, so the status page runs ahead of the TV by that
+  much. Movie times are worked out from file size and duration, which assumes
+  an even bitrate; in scenes with a higher bitrate they can be off by more.
 - **A slow provider stays slow.** The buffer absorbs uneven delivery and lets
   you build margin by pausing; it cannot make a provider that averages below
   real time keep up forever.
