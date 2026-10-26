@@ -139,7 +139,7 @@ class Passthrough:
         if self._pending:
             # Let the cancelled connection close before someone else opens one.
             await asyncio.wait([self._pending])
-        await self.connection.release(self)
+        self.connection.release(self)
 
 
 RELAY = web.AppKey("relay", Passthrough)

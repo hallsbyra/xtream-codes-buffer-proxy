@@ -123,7 +123,7 @@ async def test_switch_revokes_work_waiting_for_the_connection():
     with pytest.raises(Revoked):
         await asyncio.wait_for(waiting, 1)
     assert slow.preempted and not live.preempted
-    await connection.release(slow)
+    connection.release(slow)
     assert connection.holder is None
 
 
@@ -148,12 +148,10 @@ class FakeCache:
         self.connection.admit("tv", "movie 1")
         # 60 s at the 1 MB/s of the file below
         self.tunables = SimpleNamespace(buffer_seconds=60)
+        self.settings = SimpleNamespace(min_free_bytes=0)
 
     def disk_free(self) -> int:
         return 1 << 40
-
-    def disk_low(self) -> bool:
-        return False
 
 
 def movie(tmp_path, *covered) -> VodFile:

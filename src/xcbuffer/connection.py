@@ -124,12 +124,12 @@ class ProviderConnection:
                 # Background work may have been waiting for us to go.
                 self._changed.notify()
 
-    async def release(self, holder: Holder) -> None:
+    def release(self, holder: Holder) -> None:
         if self._holder is holder:
             self._holder = None
             self._holding_for = None
         self._changed.notify()
 
-    async def poke(self) -> None:
+    def poke(self) -> None:
         """Wake background waiters, e.g. after a holder became idle."""
         self._changed.notify()

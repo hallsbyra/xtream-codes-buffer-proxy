@@ -183,7 +183,7 @@ class LiveChannel:
                     self.clock.reset()
                     await asyncio.sleep(min(2**failures, 10) if failures else 1)
             finally:
-                await connection.release(self)
+                connection.release(self)
         finally:
             log.info("%s: stopped after %.0f s", self.label, time.time() - self.started_at)
             self.stopped = True
@@ -385,7 +385,7 @@ class LiveManager:
         while True:
             await asyncio.sleep(5)
             self.housekeeping()
-            await self.connection.poke()
+            self.connection.poke()
 
     def shutdown(self) -> None:
         for channel in list(self.channels.values()):

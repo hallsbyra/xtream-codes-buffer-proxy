@@ -214,7 +214,8 @@ class VodFile:
             # Fetching from the start tells the size.
             wanted = self.readers or self._want_foreground or self._ready_waiters
             return 0 if wanted else None
-        if self.cache.disk_free() < CRITICAL_FREE_BYTES:
+        free = self.cache.disk_free()
+        if free < CRITICAL_FREE_BYTES:
             return None
         if at is not None and (at >= self.size or self.ranges.covered_from(at)):
             # Ran into bytes we already have; continue at the next gap.
@@ -232,7 +233,8 @@ class VodFile:
         ):
             return at
         target = self.ranges.first_missing(self.play_pos, self.size)
-        if target is None or self.capped or self.cache.disk_low() or not self._window_open():
+        disk_low = free < self.cache.settings.min_free_bytes
+        if target is None or self.capped or disk_low or not self._window_open():
             return None
         # Fill the window, but not behind where the TV plays.
         return at if at is not None and at >= self.play_pos else target
@@ -382,7 +384,7 @@ class VodFile:
                 try:
                     self._save_meta()
                 finally:
-                    await connection.release(self)
+                    connection.release(self)
 
     async def _download_while_wanted(self) -> None:
         failures = 0
@@ -640,9 +642,6 @@ class VodCache:
             return shutil.disk_usage(self.dir).free
         except OSError:
             return 0
-
-    def disk_low(self) -> bool:
-        return self.disk_free() < self.settings.min_free_bytes
 
     def enforce_budget(self, active: VodFile) -> None:
         """Evict least recently read titles until the cache fits its budget."""
