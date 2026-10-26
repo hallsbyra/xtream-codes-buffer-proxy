@@ -2,6 +2,8 @@
 
 import asyncio
 import errno
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -286,3 +288,42 @@ async def test_relay_queued_before_switch_does_not_take_the_connection(provider,
     stale = [p for p in provider.stream_requests if "/7.raw" in p]
     assert not stale, "a relay queued before the switch connected after it"
     assert body == MOVIE
+
+
+# --- cache accounting ---
+
+
+async def test_short_disk_write_is_not_marked_as_cached(provider, settings, make_proxy, monkeypatch):
+    real_pwrite = os.pwrite
+
+    def short_pwrite(fd, data, offset):
+        # Regular files may take less than asked, e.g. when the disk fills up.
+        return real_pwrite(fd, bytes(data[: max(1, len(data) // 2)]), offset)
+
+    monkeypatch.setattr(os, "pwrite", short_pwrite)
+    client = await make_proxy(settings)
+    body = await (await client.get(MOVIE_URL)).read()
+    assert body == MOVIE
+
+
+async def test_hole_punch_without_saved_metadata_cannot_resurrect_ranges(
+    provider, settings, make_proxy, monkeypatch
+):
+    monkeypatch.setattr(vod_module, "KEEP_EDGE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(vod_module, "KEEP_BEHIND_SECONDS", 10)
+    client = await make_proxy(settings)
+    assert await (await client.get(MOVIE_URL)).read() == MOVIE
+    cache = client.app[VOD]
+    vf = cache.files["movie_1"]
+
+    def disk_full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", disk_full)
+        vf.trim_played()
+    # After a crash the cache is rebuilt from the metadata on disk.
+    restarted = vod_module.VodFile.load(cache, vf.meta_path)
+    on_disk = vf.path.read_bytes()
+    for start, end in restarted.ranges.to_list():
+        assert on_disk[start:end] == MOVIE[start:end], f"bytes {start}-{end} claimed but freed"

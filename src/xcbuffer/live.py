@@ -22,6 +22,7 @@ import aiohttp
 
 from .config import Settings
 from .connection import ProviderConnection, Revoked
+from .diskio import pwrite_all
 from .meter import Notifier, RateMeter
 from .tunables import Tunables
 from .upstream import CHUNK, Upstream, UpstreamError, VpnDown
@@ -215,7 +216,7 @@ class LiveChannel:
         while view:
             index, offset = divmod(self.head, SEGMENT)
             n = min(len(view), SEGMENT - offset)
-            os.pwrite(self._segment_fd(index), view[:n], offset)
+            pwrite_all(self._segment_fd(index), view[:n], offset)
             self.head += n
             view = view[n:]
         self.rate.add(len(data))

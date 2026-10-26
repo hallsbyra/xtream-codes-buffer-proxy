@@ -28,6 +28,7 @@ import aiohttp
 
 from .config import Settings
 from .connection import ProviderConnection, Revoked
+from .diskio import pwrite_all
 from .meter import Notifier, RateMeter
 from .rangeset import RangeSet
 from .tunables import Tunables
@@ -423,7 +424,7 @@ class VodFile:
             self.state = "downloading"
             log.info("%s: downloading from %d", self.label, pos)
             async for chunk in resp.content.iter_chunked(CHUNK):
-                os.pwrite(self._open(), chunk, pos)
+                pwrite_all(self._open(), chunk, pos)
                 self.ranges.add(pos, pos + len(chunk))
                 pos += len(chunk)
                 self.write_pos = pos
@@ -465,18 +466,25 @@ class VodFile:
             return
         if self._punch_unsupported:
             return
-        freed = False
-        for start, stop in self.ranges.within(KEEP_EDGE_BYTES, end):
+        played = self.ranges.remove(KEEP_EDGE_BYTES, end)
+        if not played:
+            return
+        # Record the bytes as gone before they are, so metadata found after a
+        # crash never claims bytes that were freed.
+        if not self._save_meta():
+            for start, stop in played:
+                self.ranges.add(start, stop)
+            return
+        for i, (start, stop) in enumerate(played):
             try:
                 punch_hole(self._open(), start, stop - start)
             except OSError as exc:
                 log.warning("%s: could not free disk space (%s); keeping played data", self.label, exc)
                 self._punch_unsupported = True
-                break
-            self.ranges.remove(start, stop)
-            freed = True
-        if freed:
-            self._save_meta()
+                for kept_start, kept_stop in played[i:]:
+                    self.ranges.add(kept_start, kept_stop)
+                self._save_meta()
+                return
 
     def _init_file(self, size: int, content_type: str | None) -> None:
         self.size = size
@@ -495,10 +503,11 @@ class VodFile:
             self._fd = os.open(self.path, os.O_RDWR)
         return self._fd
 
-    def _save_meta(self) -> None:
+    def _save_meta(self) -> bool:
+        """Write the metadata; False when it could not be saved."""
         self._unsaved = 0
         if self.size is None or self._deleted:
-            return
+            return False
         meta = {
             "kind": self.kind,
             "stream_id": self.stream_id,
@@ -517,6 +526,8 @@ class VodFile:
             tmp.replace(self.meta_path)
         except OSError as exc:
             log.warning("%s: could not save metadata (%s)", self.label, exc)
+            return False
+        return True
 
     @classmethod
     def load(cls, cache: VodCache, meta_path: Path) -> VodFile | None:
