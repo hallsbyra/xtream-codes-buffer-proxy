@@ -65,7 +65,7 @@ def plausible_seconds(duration: float | None, size: int | None) -> float | None:
 
 
 class NotCacheable(Exception):
-    """The provider did not give a file size; relay the stream instead."""
+    """The provider gave no file size or ignored Range; relay the stream instead."""
 
 
 @dataclass(eq=False)
@@ -106,7 +106,6 @@ class VodFile:
         self._duration: float | None = None
         self.content_type = "application/octet-stream"
         self.ranges = RangeSet()
-        self.supports_range = True
         self.last_read = time.time()
         # Where the TV last read; the buffer window is measured from here.
         self.play_pos = 0
@@ -331,10 +330,6 @@ class VodFile:
         self._wake.set()
 
     def _seek_download(self, pos: int) -> None:
-        if not self.supports_range:
-            # The download can only go on from the start; wait for it.
-            self._kick()
-            return
         if self.write_pos is not None and self.write_pos <= pos <= self.write_pos + JUMP_SLACK:
             return
         self._jump_to = pos
@@ -343,8 +338,7 @@ class VodFile:
         self._kick()
 
     def _next_target(self) -> int | None:
-        if self.size is None or not self.supports_range:
-            self._jump_to = None
+        if self.size is None:
             return 0
         if self._jump_to is not None:
             jump, self._jump_to = self._jump_to, None
@@ -443,16 +437,18 @@ class VodFile:
                 self._mark_stale("provider rejected the byte range")
             if resp.status not in (200, 206):
                 raise UpstreamError(resp.status)
-            offset, total = _parse_content_range(resp)
-            if resp.status == 200 and start > 0:
-                self.supports_range = False
+            offset, total = _parse_content_range(resp) if resp.status == 206 else (0, None)
+            if not total:
+                # Without byte ranges and a known size a seek would mean
+                # downloading again from the start: relay instead.
+                if self.size is not None:
+                    self._mark_stale("provider no longer serves byte ranges")
+                self.uncacheable = True
+                self._ready.set()
+                return
             if self.size is None:
-                if not total:
-                    self.uncacheable = True
-                    self._ready.set()
-                    return
                 self._init_file(total, resp.headers.get("Content-Type"))
-            elif total and total != self.size:
+            elif total != self.size:
                 self._mark_stale(f"size changed from {self.size} to {total}")
             pos = offset
             self.write_pos = pos
@@ -473,10 +469,8 @@ class VodFile:
                 if not self._wants_data() or self._jump_to is not None:
                     return
                 # Ran into bytes we already have; continue at the next gap.
-                if self.supports_range and pos < self.size and self.ranges.covered_from(pos):
+                if pos < self.size and self.ranges.covered_from(pos):
                     return
-            if pos < (self.size or 0) and resp.status == 200 and not self.supports_range:
-                raise UpstreamError(502, "connection ended early")
 
     def _mark_stale(self, why: str) -> None:
         """Stop serving this copy; the next request starts a fresh one."""
@@ -492,7 +486,7 @@ class VodFile:
     def trim_played(self) -> None:
         """Punch out what lies well behind every viewer, keeping the file's
         first and last bytes where containers keep headers and indexes."""
-        if self.size is None or not self.supports_range or self._deleted:
+        if self.size is None or self._deleted:
             return
         positions = [r.pos for r in self.readers if r.probe_until is None] or [self.play_pos]
         keep_from = min(positions) - int(KEEP_BEHIND_SECONDS * self.byte_rate)
@@ -566,7 +560,6 @@ class VodFile:
             "size": self.size,
             "duration": self._duration,
             "content_type": self.content_type,
-            "supports_range": self.supports_range,
             "ranges": self.ranges.to_list(),
             "play_pos": self.play_pos,
             "last_read": self.last_read,
@@ -590,7 +583,9 @@ class VodFile:
             vf.size = int(meta["size"])
             vf.duration = meta.get("duration")
             vf.content_type = meta["content_type"]
-            vf.supports_range = bool(meta.get("supports_range", True))
+            if not meta.get("supports_range", True):
+                # Cached before such titles were relayed instead.
+                return None
             vf.ranges = RangeSet(meta["ranges"])
             vf.play_pos = int(meta.get("play_pos", 0))
             vf.last_read = float(meta.get("last_read", time.time()))
@@ -709,14 +704,12 @@ class VodCache:
 
 
 def _parse_content_range(resp: aiohttp.ClientResponse) -> tuple[int, int | None]:
-    """(offset of the first byte in the body, total size or None)."""
-    if resp.status == 206:
-        match = re.match(r"bytes (\d+)-\d+/(\d+|\*)", resp.headers.get("Content-Range", ""))
-        if not match:
-            raise UpstreamError(502, "bad Content-Range from provider")
-        total = None if match.group(2) == "*" else int(match.group(2))
-        return int(match.group(1)), total
-    return 0, resp.content_length
+    """(offset of the first byte in a 206 body, total size or None)."""
+    match = re.match(r"bytes (\d+)-\d+/(\d+|\*)", resp.headers.get("Content-Range", ""))
+    if not match:
+        raise UpstreamError(502, "bad Content-Range from provider")
+    total = None if match.group(2) == "*" else int(match.group(2))
+    return int(match.group(1)), total
 
 
 def _guess_type(ext: str) -> str:

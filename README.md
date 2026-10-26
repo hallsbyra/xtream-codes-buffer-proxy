@@ -111,6 +111,9 @@ Things that have bitten us:
   rewritten to go through the proxy), but only MPEG-TS live streams get the
   disk buffer. The status page marks HLS channels as unbuffered.
 - **Catch-up / timeshift** requests are relayed without buffering.
+- **Movies and episodes need byte ranges.** A title is only cached when the
+  provider answers range requests with its total size. Otherwise it is
+  relayed without buffering.
 - **Disk space is freed with `fallocate` hole punching**, which needs a cache
   filesystem that supports it, such as ext4, XFS or Btrfs. Elsewhere played
   data stays on disk until the title is evicted.
