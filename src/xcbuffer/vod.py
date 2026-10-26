@@ -190,6 +190,11 @@ class VodFile:
     def current(self) -> bool:
         return self.cache.connection.is_current(self.label)
 
+    def _is_playback(self, pos: int) -> bool:
+        """Reads near the end are players probing the container index kept
+        there, not playback; they must not move play_pos."""
+        return self.size is None or pos < self.size - KEEP_EDGE_BYTES
+
     def _blocked(self) -> bool:
         return any(r.waiting for r in self.readers)
 
@@ -262,7 +267,8 @@ class VodFile:
     def open_reader(self, peer: str, pos: int) -> Reader:
         reader = Reader(peer, pos)
         self.readers.add(reader)
-        self.play_pos = pos
+        if self._is_playback(pos):
+            self.play_pos = pos
         return reader
 
     def close_reader(self, reader: Reader) -> None:
@@ -301,7 +307,8 @@ class VodFile:
         self.last_read = time.time()
         data = os.pread(self._open(), n, reader.pos)
         reader.pos += len(data)
-        self.play_pos = reader.pos
+        if self._is_playback(reader.pos):
+            self.play_pos = reader.pos
         if not self.downloading and self._wants_data():
             self._kick()
         return data
@@ -474,7 +481,7 @@ class VodFile:
         first and last bytes where containers keep headers and indexes."""
         if self.size is None or not self.supports_range or self._deleted:
             return
-        positions = [r.pos for r in self.readers] or [self.play_pos]
+        positions = [r.pos for r in self.readers if self._is_playback(r.pos)] or [self.play_pos]
         keep_from = min(positions) - int(KEEP_BEHIND_SECONDS * self.byte_rate)
         end = min(keep_from, self.size - KEEP_EDGE_BYTES)
         if end <= KEEP_EDGE_BYTES:

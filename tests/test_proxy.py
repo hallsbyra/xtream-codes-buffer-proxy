@@ -6,6 +6,7 @@ from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
 from xcbuffer.app import CONNECTION, VOD, VPN, _relay_token
+from xcbuffer.upstream import CHUNK
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -295,7 +296,9 @@ async def test_played_part_is_removed_from_disk(provider, settings, make_proxy, 
     assert await (await client.get(MOVIE_URL)).read() == MOVIE
     client.app[VOD].housekeeping()
     item = (await status(client))["vod"][0]
-    assert item["downloaded"] <= 2 * 1024 * 1024 + 1
+    # Both 1 MiB edges, plus 10 s (1 MiB) behind where playback left the
+    # last 1 MiB, which is the container index rather than playback.
+    assert item["downloaded"] <= 3 * 1024 * 1024 + CHUNK
     vf = client.app[VOD].files["movie_1"]
     assert os.stat(vf.path).st_blocks * 512 < 4 * 1024 * 1024
     # Start and end stay, so the player can open the file again.

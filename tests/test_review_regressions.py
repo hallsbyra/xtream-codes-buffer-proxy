@@ -442,3 +442,25 @@ async def test_old_hls_segment_does_not_play_for_the_new_channel(settings, make_
     # A late segment of the old channel neither plays as channel 6 nor switches back.
     assert late_status == 503
     assert client.app[CONNECTION].content == "live 6 hls"
+
+
+async def test_tail_probe_does_not_count_as_playback(provider, settings, make_proxy, monkeypatch):
+    monkeypatch.setattr(vod_module, "KEEP_EDGE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(vod_module, "KEEP_BEHIND_SECONDS", 10)
+    client = await make_proxy(settings)
+    await client.get("/player_api.php?username=u&password=p&action=get_vod_info&vod_id=1")
+    half = len(MOVIE) // 2
+    watched = await client.get(MOVIE_URL, headers={"Range": f"bytes=0-{half - 1}"})
+    assert await watched.read() == MOVIE[:half]
+    vf = client.app[VOD].files["movie_1"]
+
+    async def complete():
+        return vf.complete
+
+    await wait_for(complete)
+    # The player reads the index at the end, then the viewer pauses.
+    tail = await client.get(MOVIE_URL, headers={"Range": f"bytes={len(MOVIE) - 10}-"})
+    assert await tail.read() == MOVIE[-10:]
+    vf.trim_played()
+    unwatched = vf.ranges.covered_from(half)
+    assert unwatched == len(MOVIE) - half, f"only {unwatched} unwatched bytes left after a tail probe"
