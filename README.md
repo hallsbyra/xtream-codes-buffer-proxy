@@ -30,6 +30,10 @@ single connection at a time.
   so players that reconnect on their own do not start a tug of war.
 - **Only the latest title downloads.** Switching title or channel stops the
   previous download; its data is kept for a while in case you go back.
+- **Pictures go through the proxy too.** Posters, logos and guide icons that
+  the provider links on other hosts are rewritten to `/_relay/` URLs, so the
+  player reaches nothing but the proxy, and nobody outside your VPN sees what
+  you browse. Pictures never take the provider connection.
 - **Credentials are never stored.** Username and password pass through from
   the player; the proxy only needs the provider's base URL.
 

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import html
 import json
 import logging
 import re
@@ -14,6 +15,7 @@ import socket
 import time
 from collections.abc import Awaitable, Callable
 from importlib import resources
+from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import aiohttp
@@ -44,8 +46,40 @@ VPN = web.AppKey("vpn", VpnMonitor)
 TUNABLES = web.AppKey("tunables", Tunables)
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico")
+# Content label of a relayed picture: it never takes the provider connection.
+IMAGE = "image"
+# Fields of the provider API that hold a stream rather than a picture.
+STREAM_KEYS = frozenset({"direct_source"})
+URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>]+")
 RELAY_RESPONSE_HEADERS = ("Content-Type", "Content-Range", "Accept-Ranges", "Content-Disposition")
 DISCONNECTS = (ConnectionResetError, aiohttp.ClientConnectionResetError, BrokenPipeError)
+
+
+class RelayHosts(set):
+    """Hosts that /_relay/ may fetch from: the ones the provider pointed the TV
+    at. Saved, because the TV keeps its catalog, with the relay URLs in it,
+    across restarts of the proxy."""
+
+    path: Path | None = None
+
+    def load(self, path: Path) -> None:
+        self.path = path
+        try:
+            self.update(json.loads(path.read_text()))
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError):
+            log.warning("ignoring unreadable %s", path)
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(sorted(self)))
+            tmp.replace(self.path)
+        except OSError as exc:
+            log.warning("could not save relay hosts (%s)", exc)
 
 
 class Passthrough:
@@ -242,7 +276,12 @@ async def api(request: web.Request) -> web.Response:
             if action:
                 request.app[CATALOG].harvest(action, data)
             else:
-                body = json.dumps(xtream.rewrite_auth(data, host, port)).encode()
+                data = xtream.rewrite_auth(data, host, port)
+            body = json.dumps(_json_through_proxy(request.app, data, up_origin, proxy_origin)).encode()
+    elif request.path in ("/get.php", "/xmltv.php") and status == 200:
+        text = body.decode("utf-8", "surrogateescape")
+        text = _text_through_proxy(request.app, text, up_origin, proxy_origin, xml=request.path == "/xmltv.php")
+        body = text.encode("utf-8", "surrogateescape")
     for old, new in (
         (up_origin, proxy_origin),
         (up_origin.replace("/", "\\/"), proxy_origin.replace("/", "\\/")),
@@ -424,6 +463,54 @@ def _parse_relay_token(token: str) -> tuple[str, str]:
     return content, url
 
 
+def _foreign(url: str, up_origin: str) -> bool:
+    """An absolute URL to anywhere but the provider, whose URLs already point
+    at the proxy."""
+    return url.startswith(("http://", "https://")) and xtream.origin(url) != up_origin
+
+
+def _via_relay(app: web.Application, url: str, content: str, proxy_origin: str) -> str:
+    hosts = app[RELAY_HOSTS]
+    host = urlsplit(url).netloc
+    if host not in hosts:
+        hosts.add(host)
+        hosts.save()
+    return f"{proxy_origin}/_relay/{_relay_token(url, content)}"
+
+
+def _json_through_proxy(app: web.Application, data: object, up_origin: str, proxy_origin: str) -> object:
+    """Send every URL to another host (posters, logos) through /_relay/, so
+    the TV reaches nothing but the proxy and what it browses only leaves
+    over the VPN."""
+
+    def walk(value: object, key: str) -> object:
+        if isinstance(value, dict):
+            return {k: walk(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v, key) for v in value]
+        if isinstance(value, str) and _foreign(value.strip(), up_origin):
+            url = value.strip()
+            return _via_relay(app, url, _relay_content(url) if key in STREAM_KEYS else IMAGE, proxy_origin)
+        return value
+
+    return walk(data, "")
+
+
+def _text_through_proxy(app: web.Application, text: str, up_origin: str, proxy_origin: str, *, xml: bool) -> str:
+    """The same for M3U playlists (tvg-logo, streams on other hosts) and the
+    XMLTV guide (channel and programme icons)."""
+
+    def through_proxy(match: re.Match[str]) -> str:
+        url = html.unescape(match.group(0)) if xml else match.group(0)
+        if not _foreign(url, up_origin):
+            return match.group(0)
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        stream = not xml and not text[line_start : match.start()].strip()
+        return _via_relay(app, url, _relay_content(url) if stream else IMAGE, proxy_origin)
+
+    return URL_IN_TEXT.sub(through_proxy, text)
+
+
 def _rewrite_playlist(app: web.Application, text: str, base_url: str, content: str) -> str:
     """Send every URL in an HLS playlist back through /_relay/."""
     allowed = app[RELAY_HOSTS]
@@ -452,7 +539,7 @@ async def relay(
     url = url or upstream.url(request.path_qs)
     content = content or _relay_content(url)
     path = urlsplit(url).path.lower()
-    holds_slot = not path.endswith(IMAGE_SUFFIXES)
+    holds_slot = content != IMAGE and not path.endswith(IMAGE_SUFFIXES)
     if holds_slot and (busy := _busy(request, content, may_switch=may_switch)):
         return busy
     passthrough = request.app[RELAY]
@@ -668,7 +755,7 @@ def create_app(settings: Settings) -> web.Application:
     app = web.Application()
     app[SETTINGS] = settings
     app[CATALOG] = xtream.Catalog()
-    app[RELAY_HOSTS] = set()
+    app[RELAY_HOSTS] = RelayHosts()
     app[CONNECTION] = ProviderConnection()
     app[HLS] = {}
 
@@ -682,6 +769,7 @@ def create_app(settings: Settings) -> web.Application:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         app[CATALOG].path = settings.data_dir / "catalog.json"
         app[CATALOG].load()
+        app[RELAY_HOSTS].load(settings.data_dir / "relay_hosts.json")
         app[TUNABLES] = Tunables(settings.data_dir / "settings.json", settings.buffer_minutes)
         app[VOD] = VodCache(settings, app[UPSTREAM], app[CONNECTION], app[TUNABLES])
         app[LIVE] = LiveManager(settings, app[UPSTREAM], app[CONNECTION], app[TUNABLES])

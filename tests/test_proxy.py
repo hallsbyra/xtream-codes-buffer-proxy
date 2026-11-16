@@ -1,6 +1,10 @@
 import asyncio
 import json
 import os
+import re
+from urllib.parse import urlsplit
+
+from aiohttp import web
 
 from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
@@ -393,3 +397,61 @@ async def test_catch_up_is_named_after_its_channel(provider, settings, make_prox
     assert viewer["name"] == "Kanal 5"
     await client.get("/streaming/timeshift.php?username=u&password=p&stream=5&start=2026-10-26:16-00&duration=60")
     assert (await status(client))["viewer"]["content"] == "timeshift 5 2026-10-26:16-00"
+
+
+async def test_pictures_on_other_hosts_go_through_the_proxy(provider, settings, make_proxy, aiohttp_server):
+    fetched = []
+
+    async def picture(request):
+        fetched.append(request.path_qs)
+        return web.Response(body=b"PNG", content_type="image/png")
+
+    pictures = web.Application()
+    pictures.router.add_get("/{name}", picture)
+    picture_host = str((await aiohttp_server(pictures)).make_url("")).rstrip("/")
+
+    async def live_streams(request):
+        if request.query.get("action") == "get_live_streams":
+            return web.json_response([{"stream_id": 5, "name": "Kanal 5", "stream_icon": f"{picture_host}/logo?id=5"}])
+        return await provider.player_api(request)
+
+    async def get_php(request):
+        return web.Response(text=f'#EXTM3U\n#EXTINF:-1 tvg-logo="{picture_host}/m3u.png",Kanal 5\n'
+                                 f"{request.url.origin()}/live/u/p/5.ts\n")
+
+    async def xmltv(request):
+        return web.Response(text=f'<tv><channel id="5"><icon src="{picture_host}/epg?a=1&amp;b=2"/></channel></tv>',
+                            content_type="application/xml")
+
+    app = web.Application()
+    app.router.add_get("/player_api.php", live_streams)
+    app.router.add_get("/get.php", get_php)
+    app.router.add_get("/xmltv.php", xmltv)
+    app.router.add_get("/live/{user}/{password}/{name}", provider.live)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    proxy = str(client.make_url("")).rstrip("/")
+
+    streams = await (await client.get("/player_api.php?username=u&password=p&action=get_live_streams")).json()
+    playlist = await (await client.get("/get.php?username=u&password=p")).text()
+    guide = await (await client.get("/xmltv.php?username=u&password=p")).text()
+    logo = streams[0]["stream_icon"]
+    m3u_logo = re.search(r'tvg-logo="([^"]+)"', playlist)[1]
+    epg_icon = re.search(r'src="([^"]+)"', guide)[1]
+    assert picture_host not in playlist + guide + json.dumps(streams)
+    assert f"{proxy}/live/u/p/5.ts" in playlist
+    assert all(url.startswith(f"{proxy}/_relay/") for url in (logo, m3u_logo, epg_icon))
+
+    # A picture loaded while a channel plays does not take the connection.
+    live = await client.get("/live/user/pass/5.ts")
+    await live.content.readexactly(188)
+    for url in (logo, m3u_logo, epg_icon):
+        resp = await client.get(urlsplit(url).path)
+        assert (resp.status, await resp.read()) == (200, b"PNG")
+    assert fetched == ["/logo?id=5", "/m3u.png", "/epg?a=1&b=2"]
+    assert client.app[CONNECTION].content == "live 5"
+    live.close()
+
+    # The TV keeps its catalog; the picture URLs in it outlive a restart.
+    restarted = await make_proxy(settings, upstream_url=origin)
+    assert (await restarted.get(urlsplit(logo).path)).status == 200
