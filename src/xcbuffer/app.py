@@ -342,6 +342,10 @@ async def vod(request: web.Request) -> web.StreamResponse:
         pass
     finally:
         vf.close_reader(reader)
+    if reader.pos <= end:
+        # Cut short: close the connection, or the player waits on a kept-alive
+        # connection for the rest of a body that never comes.
+        resp.force_close()
     return resp
 
 
@@ -567,9 +571,13 @@ async def relay(
         resp = web.StreamResponse(status=up.status, headers=headers)
         await resp.prepare(request)
         if request.method != "HEAD":
-            with contextlib.suppress(aiohttp.ClientError, OSError, *DISCONNECTS):
+            try:
                 async for chunk in up.content.iter_chunked(CHUNK):
                     await resp.write(chunk)
+            except (aiohttp.ClientError, OSError, *DISCONNECTS):
+                # The provider dropped the stream: close, so the player sees
+                # the body end short instead of waiting for the rest.
+                resp.force_close()
         return resp
     finally:
         if up is not None:

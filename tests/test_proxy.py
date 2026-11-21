@@ -4,6 +4,7 @@ import os
 import re
 from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import web
 
 from conftest import MOVIE, status, wait_for
@@ -562,3 +563,41 @@ async def test_switching_title_does_not_wait_out_a_retry(provider, settings, mak
     assert loop.time() - started < 2
     live.close()
     movie.cancel()
+
+
+async def test_movie_cut_short_closes_the_connection(provider, settings, make_proxy):
+    provider.movie_delay = 0.05
+    client = await make_proxy(settings)
+    movie = await client.get(MOVIE_URL)
+    await movie.content.readexactly(1024)
+    # Another title takes the connection before the movie has arrived.
+    live = await client.get(LIVE_URL)
+    await live.content.readexactly(188)
+    try:
+        await asyncio.wait_for(movie.read(), 5)
+    except aiohttp.ClientPayloadError:
+        pass
+    else:
+        raise AssertionError("the movie ended as if complete")
+    live.close()
+
+
+async def test_relay_cut_short_closes_the_connection(provider, settings, make_proxy, aiohttp_server):
+    async def short_body(request):
+        resp = web.StreamResponse(headers={"Content-Length": "1000000", "Content-Type": "video/mp4"})
+        await resp.prepare(request)
+        await resp.write(b"x" * 1000)
+        request.transport.close()
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/{name}", short_body)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    resp = await client.get("/whatever.mp4")
+    try:
+        await asyncio.wait_for(resp.read(), 5)
+    except aiohttp.ClientPayloadError:
+        pass
+    else:
+        raise AssertionError("the relayed body ended as if complete")
