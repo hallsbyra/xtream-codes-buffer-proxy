@@ -589,8 +589,10 @@ async def relay_token(request: web.Request) -> web.StreamResponse:
     hls = request.app[HLS].get(peer_of(request))
     if hls and content == _hls_content(hls[0]):
         request.app[HLS][peer_of(request)] = (hls[0], time.time())
-    # Segments continue their playlist; a late one must not switch back to it.
-    return await relay(request, url, content, may_switch=False)
+    # A stream on another host (direct_source, M3U) starts something new and
+    # is named after its own URL. Segments carry their playlist's content
+    # instead; a late one must not switch back to it.
+    return await relay(request, url, content, may_switch=content == _relay_content(url))
 
 
 async def fallback(request: web.Request) -> web.StreamResponse:

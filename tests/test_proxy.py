@@ -504,3 +504,34 @@ async def test_pictures_on_other_hosts_go_through_the_proxy(provider, settings, 
     # The TV keeps its catalog; the picture URLs in it outlive a restart.
     restarted = await make_proxy(settings, upstream_url=origin)
     assert (await restarted.get(urlsplit(logo).path)).status == 200
+
+
+async def test_stream_on_another_host_starts(provider, settings, make_proxy, aiohttp_server):
+    other = web.Application()
+    other.router.add_get("/live/{user}/{password}/{name}", provider.live)
+    other_host = str((await aiohttp_server(other)).make_url("")).rstrip("/")
+
+    async def live_streams(request):
+        if request.query.get("action") == "get_live_streams":
+            return web.json_response(
+                [{"stream_id": 7, "name": "Kanal 7", "direct_source": f"{other_host}/live/u/p/7.ts"}]
+            )
+        return await provider.player_api(request)
+
+    async def get_php(request):
+        return web.Response(text=f"#EXTM3U\n#EXTINF:-1,Kanal 8\n{other_host}/live/u/p/8.ts\n")
+
+    app = web.Application()
+    app.router.add_get("/player_api.php", live_streams)
+    app.router.add_get("/get.php", get_php)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+
+    streams = await (await client.get("/player_api.php?username=u&password=p&action=get_live_streams")).json()
+    playlist = await (await client.get("/get.php?username=u&password=p")).text()
+    m3u_stream = next(line for line in playlist.splitlines() if "/_relay/" in line)
+    for url in (streams[0]["direct_source"], m3u_stream):
+        resp = await client.get(urlsplit(url).path)
+        assert resp.status == 200, await resp.text()
+        await resp.content.readexactly(188)
+        resp.close()
