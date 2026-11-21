@@ -675,3 +675,23 @@ async def test_live_channel_answering_with_nothing_backs_off(provider, settings,
     # Waits 2 s, then 4 s; it used to ask again every second.
     assert requests <= 2
     live.cancel()
+
+
+async def test_duration_is_asked_for_once_with_encoded_credentials(provider, settings, make_proxy, aiohttp_server):
+    asked = []
+
+    async def no_duration(request):
+        asked.append(dict(request.query))
+        return web.json_response({"info": {}, "movie_data": {"stream_id": 1}})
+
+    app = web.Application()
+    app.router.add_get("/player_api.php", no_duration)
+    app.router.add_get("/movie/{user}/{password}/{name}", provider.movie)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    for start in (0, 1000, 2000):
+        resp = await client.get("/movie/u/p%26x/1.mp4", headers={"Range": f"bytes={start}-{start + 99}"})
+        await resp.read()
+    await wait_for(lambda: asyncio.sleep(0, asked))
+    await asyncio.sleep(0.1)
+    assert asked == [{"username": "u", "password": "p&x", "action": "get_vod_info", "vod_id": "1"}]

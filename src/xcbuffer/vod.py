@@ -116,6 +116,8 @@ class VodFile:
         self.error: UpstreamError | None = None
         self.last_error: str | None = None
         self.capped = False
+        # The provider's API was asked for the duration
+        self.duration_asked = False
         self.uncacheable = False
         # The provider's file changed under us; the cache must be rebuilt
         self.stale = False
@@ -434,6 +436,9 @@ class VodFile:
                 self.state = "vpn_down"
                 await self._interruptible(self.cache.upstream.wait_allowed())
             except (aiohttp.ClientError, TimeoutError, OSError, UpstreamError) as exc:
+                if self.stale:
+                    # The file changed; the next request starts a fresh copy.
+                    return
                 failures += 1
                 self.last_error = str(exc) or type(exc).__name__
                 log.warning("%s: download failed (%s), attempt %d", self.label, self.last_error, failures)

@@ -16,7 +16,7 @@ import time
 from collections.abc import Awaitable, Callable
 from importlib import resources
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -178,6 +178,8 @@ class Passthrough:
 
 
 RELAY = web.AppKey("relay", Passthrough)
+# Tasks nobody awaits, kept referenced until they finish
+_background: set[asyncio.Task] = set()
 
 
 # --- helpers ---------------------------------------------------------------------------
@@ -357,24 +359,35 @@ def _learn_duration(request: web.Request, vf) -> None:
     entry = request.app[CATALOG].get(vf.kind, vf.stream_id)
     if entry.duration:
         vf.duration = entry.duration
-    if vf.duration or vf.kind != "movie":
+    if vf.duration or vf.kind != "movie" or vf.duration_asked:
         return
-    user, password = request.match_info["user"], request.match_info["password"]
-    path = f"/player_api.php?username={user}&password={password}&action=get_vod_info&vod_id={vf.stream_id}"
+    query = urlencode({
+        "username": request.match_info["user"],
+        "password": request.match_info["password"],
+        "action": "get_vod_info",
+        "vod_id": vf.stream_id,
+    })
 
     async def fetch() -> None:
         upstream = request.app[UPSTREAM]
         try:
             async with await upstream.get(
-                upstream.url(path), forward_headers(request.headers), timeout=API_TIMEOUT
+                upstream.url(f"/player_api.php?{query}"), forward_headers(request.headers), timeout=API_TIMEOUT
             ) as resp:
                 data = xtream.parse_json(await resp.read()) if resp.status == 200 else None
         except (aiohttp.ClientError, TimeoutError, UpstreamError):
+            # Ask again with the next request.
+            vf.duration_asked = False
             return
         request.app[CATALOG].harvest("get_vod_info", data)
         vf.duration = vf.duration or request.app[CATALOG].get(vf.kind, vf.stream_id).duration
 
-    asyncio.create_task(fetch())
+    # Once per title, not once per range request; the task is kept
+    # referenced so it is not collected before it finishes.
+    vf.duration_asked = True
+    task = asyncio.create_task(fetch())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 # --- live ---------------------------------------------------------------------------------
