@@ -198,8 +198,14 @@ class LiveChannel:
             if resp.status != 200:
                 raise UpstreamError(resp.status)
             self.state = "streaming"
+            received = False
             async for chunk in resp.content.iter_chunked(CHUNK):
                 self._append(chunk)
+                received = True
+            if not received:
+                # Counts as a failure, or a channel answering with nothing
+                # is asked again every second forever.
+                raise UpstreamError(502, "provider sent no data")
 
     # --- storage -------------------------------------------------------------------
 
@@ -223,7 +229,9 @@ class LiveChannel:
         now = time.time()
         if not self.samples or now - self.samples[-1][0] >= 1:
             self.samples.append((now, self.head, self.clock.seconds))
-        self._trim()
+            # Once a second is often enough, and finding a segment's time
+            # goes through every sample.
+            self._trim()
         self._changed.notify()
 
     def _trim(self) -> None:

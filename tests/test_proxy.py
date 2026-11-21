@@ -655,3 +655,23 @@ async def test_reader_of_a_removed_title_does_not_read_the_new_copy(provider, se
         raise AssertionError(f"read {old.read(reader, 16)!r} from the new copy")
     old.close_reader(reader)
     resp.close()
+
+
+async def test_live_channel_answering_with_nothing_backs_off(provider, settings, make_proxy, aiohttp_server):
+    requests = 0
+
+    async def empty(request):
+        nonlocal requests
+        requests += 1
+        return web.Response(body=b"", content_type="video/mp2t")
+
+    app = web.Application()
+    app.router.add_get("/player_api.php", provider.player_api)
+    app.router.add_get("/live/{user}/{password}/{name}", empty)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    live = asyncio.ensure_future(client.get(LIVE_URL))
+    await asyncio.sleep(3.5)
+    # Waits 2 s, then 4 s; it used to ask again every second.
+    assert requests <= 2
+    live.cancel()
