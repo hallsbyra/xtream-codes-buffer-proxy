@@ -33,8 +33,6 @@ SEGMENT = 32 * 1024 * 1024
 TS_PACKET = 188
 MAX_FAILURES = 8
 FATAL_STATUSES = {400, 401, 404, 410}
-# A channel without viewers gives way to background downloads after this long.
-IDLE_YIELD_SECONDS = 120
 # Ignore PCR jumps bigger than this; they are discontinuities, not playback time.
 MAX_PCR_STEP = 5.0
 
@@ -128,9 +126,6 @@ class LiveChannel:
     def preempt(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
-
-    def is_idle(self) -> bool:
-        return self.idle_since is not None and time.time() - self.idle_since > IDLE_YIELD_SECONDS
 
     # --- lifecycle ----------------------------------------------------------------
 
@@ -393,7 +388,6 @@ class LiveManager:
         while True:
             await asyncio.sleep(5)
             self.housekeeping()
-            self.connection.poke()
 
     def shutdown(self) -> None:
         for channel in list(self.channels.values()):

@@ -152,9 +152,6 @@ class VodFile:
         if self._fetch_task:
             self._fetch_task.cancel()
 
-    def is_idle(self) -> bool:
-        return False
-
     # --- state ------------------------------------------------------------
 
     @property

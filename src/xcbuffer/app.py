@@ -107,9 +107,6 @@ class Passthrough:
         # A connection still waiting for the provider's response headers
         self._pending: asyncio.Future | None = None
 
-    def is_idle(self) -> bool:
-        return False
-
     def preempt(self) -> None:
         self._preempted = True
         if self._pending:

@@ -106,9 +106,6 @@ class Holder:
     def preempt(self) -> None:
         self.preempted = True
 
-    def is_idle(self) -> bool:
-        return False
-
 
 async def test_switch_revokes_work_waiting_for_the_connection():
     connection = ProviderConnection()

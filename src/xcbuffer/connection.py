@@ -12,7 +12,7 @@ other content revokes that: the holder is told to close, and work still
 waiting for the connection on behalf of the old content gives up instead of
 connecting later. A new request from the TV (foreground) takes the
 connection from whoever has it; background work such as finishing a movie
-download only gets it when it is free or held by something idle.
+download only gets it when it is free.
 """
 
 from __future__ import annotations
@@ -31,9 +31,6 @@ class Holder(Protocol):
 
     def preempt(self) -> None:
         """Close the provider connection soon and release it."""
-
-    def is_idle(self) -> bool:
-        """True when background work may take the connection from this holder."""
 
 
 class Revoked(UpstreamError):
@@ -115,7 +112,7 @@ class ProviderConnection:
                     self._holder = holder
                     self._holding_for = content
                     return
-                if self._holder is not None and (foreground or self._holder.is_idle()):
+                if self._holder is not None and foreground:
                     self._holder.preempt()
                 await self._changed.wait()
         finally:
@@ -128,8 +125,4 @@ class ProviderConnection:
         if self._holder is holder:
             self._holder = None
             self._holding_for = None
-        self._changed.notify()
-
-    def poke(self) -> None:
-        """Wake background waiters, e.g. after a holder became idle."""
         self._changed.notify()
