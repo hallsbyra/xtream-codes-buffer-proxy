@@ -11,6 +11,7 @@ from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
 from xcbuffer.app import CONNECTION, RELAY, VOD, VPN, _relay_token
+from xcbuffer.upstream import UpstreamError
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -633,3 +634,24 @@ async def test_relay_keeps_the_connection_while_the_next_one_connects(provider, 
     await asyncio.sleep(2 * settings.passthrough_linger_seconds)
     assert client.app[CONNECTION].holder is client.app[RELAY]
     second.close()
+
+
+async def test_reader_of_a_removed_title_does_not_read_the_new_copy(provider, settings, make_proxy):
+    client = await make_proxy(settings)
+    assert await (await client.get(MOVIE_URL)).read() == MOVIE
+    cache = client.app[VOD]
+    old = cache.files["movie_1"]
+    reader = old.open_reader("tv", 8 * 1024 * 1024)
+    cache.remove(old)
+    # A new copy starts at the same path, still mostly empty.
+    provider.movie_delay = 0.05
+    resp = await client.get(MOVIE_URL)
+    await resp.content.readexactly(1024)
+    try:
+        await old.wait_data(reader)
+    except UpstreamError:
+        pass
+    else:
+        raise AssertionError(f"read {old.read(reader, 16)!r} from the new copy")
+    old.close_reader(reader)
+    resp.close()

@@ -613,6 +613,9 @@ class VodFile:
 
     def delete(self) -> None:
         self._deleted = True
+        # A reader still open must not find bytes here; a new copy of the
+        # title may be written at the same path.
+        self.ranges = RangeSet()
         self._changed.notify()
         if self._task:
             self._task.cancel()
