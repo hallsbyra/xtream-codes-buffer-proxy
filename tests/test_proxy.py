@@ -535,3 +535,30 @@ async def test_stream_on_another_host_starts(provider, settings, make_proxy, aio
         assert resp.status == 200, await resp.text()
         await resp.content.readexactly(188)
         resp.close()
+
+
+async def test_switching_title_does_not_wait_out_a_retry(provider, settings, make_proxy, aiohttp_server):
+    failures = 0
+
+    async def failing_movie(request):
+        nonlocal failures
+        failures += 1
+        raise web.HTTPInternalServerError()
+
+    app = web.Application()
+    app.router.add_get("/player_api.php", provider.player_api)
+    app.router.add_get("/movie/{user}/{password}/{name}", failing_movie)
+    app.router.add_get("/live/{user}/{password}/{name}", provider.live)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    movie = asyncio.ensure_future(client.get(MOVIE_URL))
+    # After the second failure the download waits 4 s before trying again.
+    await wait_for(lambda: asyncio.sleep(0, failures >= 2))
+    await asyncio.sleep(0.1)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    live = await client.get(LIVE_URL)
+    await live.content.readexactly(188)
+    assert loop.time() - started < 2
+    live.close()
+    movie.cancel()

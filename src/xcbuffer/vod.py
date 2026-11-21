@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,19 +409,30 @@ class VodFile:
                 finally:
                     connection.release(self)
 
+    async def _interruptible(self, step: Awaitable[None]) -> bool:
+        """Run a step of the download that preempt() and _replan() can cut
+        short, including the waits between attempts, so the connection is
+        not held while nothing is downloaded. False when it was cut short."""
+        self._fetch_task = asyncio.ensure_future(step)
+        try:
+            await self._fetch_task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            return False
+        finally:
+            self._fetch_task = None
+        return True
+
     async def _download_while_wanted(self) -> None:
         failures = 0
         while not self._preempted and (target := self._next_fetch()) is not None:
-            self._fetch_task = asyncio.create_task(self._fetch(target))
             try:
-                await self._fetch_task
-                failures = 0
-            except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
-                    raise
+                if await self._interruptible(self._fetch(target)):
+                    failures = 0
             except VpnDown:
                 self.state = "vpn_down"
-                await self.cache.upstream.wait_allowed()
+                await self._interruptible(self.cache.upstream.wait_allowed())
             except (aiohttp.ClientError, TimeoutError, OSError, UpstreamError) as exc:
                 failures += 1
                 self.last_error = str(exc) or type(exc).__name__
@@ -432,9 +444,7 @@ class VodFile:
                     self._changed.notify()
                     return
                 self.state = "retrying"
-                await asyncio.sleep(min(2**failures, 20))
-            finally:
-                self._fetch_task = None
+                await self._interruptible(asyncio.sleep(min(2**failures, 20)))
 
     async def _fetch(self, start: int) -> None:
         assert self._upstream_path is not None
