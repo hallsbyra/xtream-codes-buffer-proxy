@@ -167,8 +167,9 @@ class Passthrough:
         self._release = loop.call_later(delay, lambda: asyncio.ensure_future(self._release_now()))
 
     async def _release_now(self) -> None:
-        # A new relay may have started between scheduling and running.
-        if self.active and not self._preempted:
+        # A new relay may have started, or be connecting, between scheduling
+        # and running; it schedules a release of its own when it ends.
+        if (self.active or self._pending) and not self._preempted:
             return
         if self._pending:
             # Let the cancelled connection close before someone else opens one.

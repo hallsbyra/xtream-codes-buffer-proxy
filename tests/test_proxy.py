@@ -10,7 +10,7 @@ from aiohttp import web
 from conftest import MOVIE, status, wait_for
 from xcbuffer import app as app_module
 from xcbuffer import vod as vod_module
-from xcbuffer.app import CONNECTION, VOD, VPN, _relay_token
+from xcbuffer.app import CONNECTION, RELAY, VOD, VPN, _relay_token
 
 MOVIE_URL = "/movie/user/pass/1.mp4"
 LIVE_URL = "/live/user/pass/5.ts"
@@ -601,3 +601,35 @@ async def test_relay_cut_short_closes_the_connection(provider, settings, make_pr
         pass
     else:
         raise AssertionError("the relayed body ended as if complete")
+
+
+async def test_relay_keeps_the_connection_while_the_next_one_connects(provider, settings, make_proxy, aiohttp_server):
+    requests = 0
+
+    async def stream(request):
+        nonlocal requests
+        requests += 1
+        if requests > 1:
+            # Slower to answer than the relay lingers.
+            await asyncio.sleep(1)
+        resp = web.StreamResponse(headers={"Content-Type": "video/mp2t"})
+        await resp.prepare(request)
+        while True:
+            await resp.write(b"x" * 188 * 100)
+            await asyncio.sleep(0.01)
+
+    app = web.Application()
+    app.router.add_get("/{name}", stream)
+    origin = str((await aiohttp_server(app)).make_url("")).rstrip("/")
+    client = await make_proxy(settings, upstream_url=origin)
+    first = await client.get("/stream.ts")
+    await first.content.readexactly(188)
+    # The player opens the stream again and drops the old connection.
+    second = asyncio.ensure_future(client.get("/stream.ts"))
+    await asyncio.sleep(0.1)
+    first.close()
+    second = await second
+    await second.content.readexactly(188)
+    await asyncio.sleep(2 * settings.passthrough_linger_seconds)
+    assert client.app[CONNECTION].holder is client.app[RELAY]
+    second.close()
