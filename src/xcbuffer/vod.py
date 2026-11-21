@@ -50,6 +50,8 @@ KEEP_EDGE_BYTES = 16 * 1024 * 1024
 KEEP_BEHIND_SECONDS = 5 * 60
 # A full buffer starts downloading again when it has drained to this share.
 REFILL_AT = 0.8
+# The buffer is never cut below this by the cache size.
+MIN_WINDOW_SECONDS = 60
 # Byte rate assumed when the title's duration is unknown (about 20 Mbit/s).
 FALLBACK_BYTE_RATE = 2.5 * 1024 * 1024
 # Above UHD Blu-ray rates; a duration giving more than this is not seconds.
@@ -184,7 +186,22 @@ class VodFile:
         return self.ranges.covered_from(self.play_pos)
 
     def window_bytes(self) -> int:
-        return int(self.cache.tunables.buffer_seconds * self.byte_rate)
+        """The buffer setting in bytes, cut to what the cache holds besides
+        the minutes kept behind the viewer and the file's ends. A window the
+        cache cannot hold would cap the title and leave the TV waiting for
+        every chunk once the buffer has drained."""
+        wanted = int(self.cache.tunables.buffer_seconds * self.byte_rate)
+        room = (
+            self.cache.settings.vod_cache_bytes
+            - int(KEEP_BEHIND_SECONDS * self.byte_rate)
+            - 2 * KEEP_EDGE_BYTES
+        )
+        return min(wanted, max(room, int(MIN_WINDOW_SECONDS * self.byte_rate)))
+
+    @property
+    def window_limited(self) -> bool:
+        """The cache size, not the buffer setting, limits the window."""
+        return self.window_bytes() < int(self.cache.tunables.buffer_seconds * self.byte_rate)
 
     @property
     def current(self) -> bool:
@@ -382,7 +399,12 @@ class VodFile:
             finally:
                 self.write_pos = None
                 try:
+                    # A download for a waiting reader ends before the next
+                    # budget check in _fetch; check here so a cap is lifted
+                    # once played bytes are gone.
+                    self.trim_played()
                     self._save_meta()
+                    self.cache.enforce_budget(self)
                 finally:
                     connection.release(self)
 
@@ -665,13 +687,20 @@ class VodCache:
     def housekeeping(self) -> None:
         cutoff = time.time() - self.settings.vod_keep_seconds
         for vf in list(self.files.values()):
-            if vf.readers or vf.downloading:
+            if vf.downloading:
+                # Trims as it downloads.
                 continue
-            if not vf.current and vf.last_read < cutoff:
+            if not vf.readers and not vf.current and vf.last_read < cutoff:
                 log.info("removing %s, not watched for a while", vf.label)
                 self.remove(vf)
             else:
                 vf.trim_played()
+        for vf in list(self.files.values()):
+            if vf.current and vf.capped and not vf.downloading:
+                # Played bytes are gone; refill before the TV runs dry.
+                self.enforce_budget(vf)
+                if not vf.capped:
+                    vf._kick()
 
     async def run_housekeeping(self) -> None:
         while True:

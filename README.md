@@ -69,7 +69,7 @@ Set these in `.env`.
 | `UPSTREAM_URL` | – | Provider base URL without credentials, e.g. `http://provider.example:8080` |
 | `CACHE_PATH` | `./data` | Host directory for the cache, mounted at `/data`; needs no backup |
 | `BUFFER_MINUTES` | `30` | Default buffer window; the status page overrides it and saves the choice |
-| `VOD_CACHE_GB` | `10` | Disk for movies and episodes before the least recently watched is evicted |
+| `VOD_CACHE_GB` | `10` | Disk for movies and episodes before the least recently watched is evicted; a movie's buffer is shortened to fit, which matters for 4K titles |
 | `VOD_KEEP_MINUTES` | `30` | How long a title's data is kept after switching to something else |
 | `MIN_FREE_GB` | `2` | Stop downloading ahead when the disk has less free space than this |
 | `LIVE_BUFFER_GB` | `3` | Disk limit per live channel, on top of the time window |

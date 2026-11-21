@@ -246,6 +246,7 @@ function vodCard(item) {
       </div>
       ${buffer}
       ${item.duration_known ? "" : `<div class="note">The length is unknown, so the minutes are estimates.</div>`}
+      ${item.current && item.window_limited ? `<div class="note">The buffer is shorter than the setting: at this title's bitrate the cache size (VOD_CACHE_GB) holds no more.</div>` : ""}
       ${item.capped ? `<div class="note">The cache is full – only downloading what is played.</div>` : ""}
       ${item.error ? `<div class="err">${esc(item.error)}</div>` : ""}
       <div class="row" style="margin-top:12px">

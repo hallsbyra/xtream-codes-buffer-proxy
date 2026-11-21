@@ -148,7 +148,7 @@ class FakeCache:
         self.connection.admit("tv", "movie 1")
         # 60 s at the 1 MB/s of the file below
         self.tunables = SimpleNamespace(buffer_seconds=60)
-        self.settings = SimpleNamespace(min_free_bytes=0)
+        self.settings = SimpleNamespace(min_free_bytes=0, vod_cache_bytes=10 * 1024 * MB)
 
     def disk_free(self) -> int:
         return 1 << 40

@@ -309,6 +309,55 @@ async def test_played_part_is_removed_from_disk(provider, settings, make_proxy, 
     assert await tail.read() == MOVIE[-1000:]
 
 
+async def test_housekeeping_trims_while_the_tv_watches(provider, settings, make_proxy, monkeypatch):
+    monkeypatch.setattr(vod_module, "KEEP_EDGE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(vod_module, "KEEP_BEHIND_SECONDS", 10)
+    client = await make_proxy(settings)
+    await client.get("/player_api.php?username=u&password=p&action=get_vod_info&vod_id=1")
+    resp = await client.get(MOVIE_URL, headers={"Range": f"bytes=0-{4 * 1024 * 1024 - 1}"})
+    await resp.read()
+    vf = client.app[VOD].files["movie_1"]
+    await wait_for(lambda: asyncio.sleep(0, vf.ranges.covered_from(4 * 1024 * 1024) and not vf.downloading))
+    # The TV plays on from the buffer; nothing downloads to trim behind it.
+    reader = vf.open_reader("tv", 20 * 1024 * 1024)
+    client.app[VOD].housekeeping()
+    assert vf.downloaded < 8 * 1024 * 1024
+    vf.close_reader(reader)
+
+
+async def test_high_bitrate_title_keeps_refilling_within_the_cache(provider, settings, make_proxy, monkeypatch):
+    # A buffer setting larger than the cache used to cap the title for good:
+    # once the buffer drained, every chunk was fetched as the TV waited for it.
+    monkeypatch.setattr(vod_module, "KEEP_EDGE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(vod_module, "KEEP_BEHIND_SECONDS", 10)
+    monkeypatch.setattr(vod_module, "META_SAVE_BYTES", 4 * 1024 * 1024)
+    provider.movie_delay = 0.01
+    budget = 10 * 1024 * 1024
+    client = await make_proxy(settings, vod_cache_bytes=budget, buffer_minutes=30)
+    await client.get("/player_api.php?username=u&password=p&action=get_vod_info&vod_id=1")
+    resp = await client.get(MOVIE_URL)
+    await resp.content.readexactly(64 * 1024)
+    vf = client.app[VOD].files["movie_1"]
+    await wait_for(lambda: asyncio.sleep(0, vf.size is not None and not vf.downloading))
+    item = (await status(client))["vod"][0]
+    assert item["window_limited"]
+    assert item["window_seconds"] < 30 * 60
+    # Play 14 MiB, past what the first fill held.
+    for _ in range(14 * 16):
+        await resp.content.readexactly(64 * 1024)
+        await asyncio.sleep(0.02)
+
+    def refilled():
+        full = vf.ahead_bytes >= vod_module.REFILL_AT * vf.window_bytes()
+        rest = vf.play_pos + vf.ahead_bytes >= vf.size
+        return asyncio.sleep(0, (full or rest) and not vf.downloading)
+
+    await wait_for(refilled)
+    assert not vf.capped
+    assert client.app[VOD].used_bytes() <= budget
+    resp.close()
+
+
 async def test_only_the_latest_title_downloads(provider, settings, make_proxy):
     provider.movie_delay = 0.02
     client = await make_proxy(settings, vod_keep_seconds=0)

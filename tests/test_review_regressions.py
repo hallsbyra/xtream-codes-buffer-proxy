@@ -454,10 +454,10 @@ async def test_tail_probe_does_not_count_as_playback(provider, settings, make_pr
     assert await watched.read() == MOVIE[:half]
     vf = client.app[VOD].files["movie_1"]
 
-    async def complete():
-        return vf.complete
+    async def rest_downloaded():
+        return vf.ranges.covered_from(half) == len(MOVIE) - half and not vf.downloading
 
-    await wait_for(complete)
+    await wait_for(rest_downloaded)
     # The player reads the index at the end, then the viewer pauses.
     tail = await client.get(MOVIE_URL, headers={"Range": f"bytes={len(MOVIE) - 10}-"})
     assert await tail.read() == MOVIE[-10:]

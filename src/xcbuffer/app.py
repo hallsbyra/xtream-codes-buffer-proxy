@@ -665,6 +665,7 @@ async def status(request: web.Request) -> web.Response:
             "ahead_bytes": vf.ahead_bytes,
             "rest_downloaded": vf.size is not None and vf.play_pos + vf.ahead_bytes >= vf.size,
             "window_seconds": vf.window_bytes() / byte_rate if vf.size else None,
+            "window_limited": vf.window_limited if vf.size else False,
             "viewers": [
                 {
                     "peer": r.peer,
