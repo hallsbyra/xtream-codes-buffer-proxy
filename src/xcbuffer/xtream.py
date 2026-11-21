@@ -28,6 +28,7 @@ class Catalog:
 
     entries: dict[tuple[str, str], CatalogEntry] = field(default_factory=dict)
     path: Path | None = None
+    _changed: bool = field(default=False, init=False, repr=False)
 
     def load(self) -> None:
         if not self.path or not self.path.exists():
@@ -52,17 +53,27 @@ class Catalog:
     def _put(self, kind: str, stream_id: Any, name: Any = None, duration: Any = None) -> None:
         if stream_id in (None, ""):
             return
-        entry = self.entries.setdefault((kind, str(stream_id)), CatalogEntry())
-        if isinstance(name, str) and name.strip():
+        key = (kind, str(stream_id))
+        entry = self.entries.get(key)
+        if entry is None:
+            entry = self.entries[key] = CatalogEntry()
+            self._changed = True
+        if isinstance(name, str) and name.strip() and entry.name != name.strip():
             entry.name = name.strip()
+            self._changed = True
         seconds = _seconds(duration)
-        if seconds:
+        if seconds and entry.duration != seconds:
             entry.duration = seconds
+            self._changed = True
 
     def harvest(self, action: str | None, payload: Any) -> None:
         self._harvest(action, payload)
+        if not self._changed:
+            # Saving a large catalog blocks for a while; most answers add nothing.
+            return
         try:
             self.save()
+            self._changed = False
         except OSError as exc:
             # Names are a convenience; the API answer must still go through.
             log.warning("could not save the catalog (%s)", exc)

@@ -215,3 +215,14 @@ async def test_next_fetch_keeps_going_for_an_index_probe_only(tmp_path):
     assert vf._next_fetch(at=96 * MB) == 96 * MB
     vf.close_reader(probe)
     assert vf._next_fetch(at=96 * MB) is None
+
+
+def test_catalog_is_saved_only_when_it_changes(tmp_path):
+    catalog = Catalog(path=tmp_path / "catalog.json")
+    listing = [{"stream_id": 5, "name": "Kanal 5"}]
+    catalog.harvest("get_live_streams", listing)
+    catalog.path.unlink()
+    catalog.harvest("get_live_streams", listing)
+    assert not catalog.path.exists()
+    catalog.harvest("get_live_streams", [{"stream_id": 5, "name": "Kanal 5 HD"}])
+    assert catalog.path.exists()
